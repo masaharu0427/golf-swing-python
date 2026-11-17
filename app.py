@@ -445,6 +445,68 @@ def editor_component():
     return declare_component("golf_simple_drag_editor",path=str(folder))
 
 
+ANDROID_UPLOAD_HTML = r"""<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{margin:0;font-family:Arial,'Yu Gothic',sans-serif;color:#19382c}*{box-sizing:border-box}.box{padding:12px;background:#f0f4ef;border:1px solid #cbd5c6;border-radius:8px}button{font:inherit;padding:12px;border:1px solid #9caf98;border-radius:6px;background:white;color:#19382c;cursor:pointer;margin:4px 4px 4px 0}button:disabled{opacity:.45;cursor:default}#send{background:#247052;color:white}#name{margin:10px 0;overflow-wrap:anywhere;font-weight:bold}#status{font-size:14px;line-height:1.6;white-space:pre-wrap}progress{width:100%;height:18px}small{display:block;margin:8px 0;color:#52644c;line-height:1.6}
+</style><div class="box" id="root"><button id="choose">① ファイルから動画を選ぶ</button><button id="gallery">写真・動画から選ぶ</button><input type="file" id="files" hidden><input type="file" id="videos" accept="video/*" hidden><div id="name">動画はまだ選ばれていません</div><button id="send" disabled>② 動画を送信</button><progress id="progress" value="0" max="100"></progress><div id="status" role="status">端末内に保存した動画を選んでください（200MBまで）</div><small>動画名が出たら「② 動画を送信」を押してください。受信完了後、下の「動画を読み込んで解析」を押します。</small></div><script>
+const $=id=>document.getElementById(id);let file=null,busy=false,args={},pending=null,picker=false;
+function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*');}
+function height(){post('streamlit:setFrameHeight',{height:Math.ceil($('root').getBoundingClientRect().height)+8});}
+function status(t){$('status').textContent=t;height();}
+function controls(){for(const id of ['choose','gallery','files','videos'])$(id).disabled=busy;$('send').disabled=busy||!file;}
+for(const [button,input] of [['choose','files'],['gallery','videos']]){$(button).onclick=()=>{picker=true;$(input).value='';$(input).click();};$(input).onchange=()=>{picker=false;const f=$(input).files[0];if(!f)return;file=f;$('name').textContent=f.name+'（'+(f.size/1048576).toFixed(1)+' MB）';$('progress').value=0;if(!f.size||f.size>200*1048576){file=null;status('空の動画、または200MBを超える動画です。別の動画を選んでください。');}else status('動画を選択しました。「② 動画を送信」を押してください。');controls();height();};}
+window.addEventListener('focus',()=>{if(picker)setTimeout(()=>{if(picker){picker=false;status('動画名がまだ返っていません。「① ファイルから動画を選ぶ」で端末内の動画を選んでください。');}},2000);});
+function send(value,expected){return new Promise((resolve,reject)=>{let attempts=0;const transmit=()=>{post('streamlit:setComponentValue',{dataType:'json',value});};const timer=setInterval(()=>{if(++attempts>=3){clearInterval(timer);pending=null;reject(Error('応答がありません。アプリを開き直してから、もう一度送信してください。'));}else{status('接続を確認して再送しています…');transmit();}},15000);pending={id:value.id,expected,resolve:()=>{clearInterval(timer);pending=null;resolve();},reject:e=>{clearInterval(timer);pending=null;reject(Error(e));}};transmit();});}
+function read(slice){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(Error('この動画を端末から読み出せません。端末内へ保存した動画で試してください。'));r.readAsDataURL(slice);});}
+$('send').onclick=async()=>{if(!file||busy)return;const chosen=file,id=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);busy=true;controls();try{status('送信を開始しています…');await send({kind:'begin',id,name:chosen.name,size:chosen.size},0);let seq=0;for(let offset=0;offset<chosen.size;offset+=262144){const end=Math.min(chosen.size,offset+262144),data=await read(chosen.slice(offset,end));status('動画を送信中… '+Math.floor(offset/chosen.size*100)+'%');await send({kind:'chunk',id,seq,data},seq+1);seq++;$('progress').value=Math.round(end/chosen.size*100);}status('受信完了。下の「動画を読み込んで解析」を押してください。');}catch(e){status(e.message);}finally{busy=false;controls();}};
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data.type!=='streamlit:render')return;args=e.data.args||{};if(pending&&args.transfer_id===pending.id){if(args.error)pending.reject(args.error);else if(args.next_seq>=pending.expected)pending.resolve();}if(!file&&args.complete){$('name').textContent='受信済み：'+args.name;$('progress').value=100;status('受信完了。下の「動画を読み込んで解析」を押してください。');}height();});
+new ResizeObserver(height).observe($('root'));post('streamlit:componentReady',{apiVersion:1});height();
+</script></html>"""
+
+
+def accept_android_upload(state: dict, event) -> bool:
+    if not isinstance(event,dict):return False
+    transfer_id=event.get("id")
+    if not isinstance(transfer_id,str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}",transfer_id):return False
+    kind=event.get("kind")
+    if kind=="begin":
+        if state.get("id")==transfer_id:return False
+        size=event.get("size");name=event.get("name")
+        if not isinstance(size,int) or isinstance(size,bool) or not 0<size<=200*1024*1024:return False
+        if not isinstance(name,str) or not 0<len(name)<=512:return False
+        state.clear();state.update(id=transfer_id,name=name,size=size,data=bytearray(),next_seq=0,complete=False,error=None)
+        return True
+    if kind!="chunk" or state.get("id")!=transfer_id or state.get("error"):return False
+    seq=event.get("seq")
+    if not isinstance(seq,int) or isinstance(seq,bool) or seq!=state.get("next_seq"):return False
+    encoded=event.get("data")
+    try:
+        if not isinstance(encoded,str) or len(encoded)>349528:raise ValueError("送信データのサイズが不正です。")
+        chunk=base64.b64decode(encoded,validate=True)
+        expected=min(262144,state["size"]-len(state["data"]))
+        if not expected or len(chunk)!=expected:raise ValueError("動画の一部を受信できませんでした。もう一度動画を選んで送信してください。")
+        state["data"].extend(chunk);state["next_seq"]+=1
+        state["complete"]=len(state["data"])==state["size"]
+    except (ValueError,TypeError) as exc:state["error"]=str(exc)
+    return True
+
+
+class AndroidVideo:
+    def __init__(self,state):self.name=state["name"];self.size=state["size"];self.data=state["data"]
+    def getbuffer(self):return memoryview(self.data)
+
+
+def android_upload():
+    folder=Path(tempfile.gettempdir())/("golf_android_upload_"+hashlib.sha256(ANDROID_UPLOAD_HTML.encode()).hexdigest()[:16])
+    folder.mkdir(exist_ok=True);index=folder/"index.html"
+    if not index.exists():index.write_text(ANDROID_UPLOAD_HTML,encoding="utf-8")
+    component=declare_component("golf_android_upload",path=str(folder))
+    state=st.session_state.setdefault("android_upload_state",{})
+    event=component(transfer_id=state.get("id"),next_seq=state.get("next_seq",-1),complete=state.get("complete",False),error=state.get("error"),name=state.get("name",""),key="android_upload_widget",default=None)
+    if accept_android_upload(state,event):st.rerun()
+    if state.get("error"):st.error(state["error"])
+    return AndroidVideo(state) if state.get("complete") and not state.get("error") else None
+
+
 def clear_outputs():
     if "job" in st.session_state:
         st.session_state["job"]["output_video"]=None;st.session_state["job"]["output_images"]=None
@@ -493,7 +555,11 @@ def main():
             max_side=st.selectbox("解析用動画の長辺",[720,960],index=1,format_func=lambda x:f"{x}px")
             st.caption("処理を軽くするため30fps・選択した解像度へ変換します。高速度撮影の元動画は残してください。")
     st.subheader("1. 動画を選ぶ")
-    uploaded=st.file_uploader("動画を選択",type=None,help="MP4 / MOVなど。Androidで写真選択が止まる場合は、端末内へ保存し「ファイル」から選んでください。")
+    upload_method=st.radio("動画の取り込み方法",["通常（PCなど）","Android向け（分割送信）"],horizontal=True,key="upload_method")
+    if upload_method=="Android向け（分割送信）":
+        uploaded=android_upload()
+    else:
+        uploaded=st.file_uploader("動画を選択",type=None,help="ファイル名が出ない場合は、上の「Android向け（分割送信）」を選んでください。")
     if uploaded is not None:
         st.caption(f"受信済み：{uploaded.name}　{uploaded.size/1024/1024:.1f} MB")
     if st.button("動画を読み込んで解析",type="primary",disabled=uploaded is None):
