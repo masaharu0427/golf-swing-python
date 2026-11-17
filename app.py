@@ -469,9 +469,10 @@ def step_frame(code,widget,delta):
 
 
 def main():
-    st.set_page_config(page_title="ゴルフスイング分析・簡単操作版",page_icon="🏌️",layout="wide",initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="ゴルフスイング分析・簡単操作版",page_icon="🏌️",layout="wide",initial_sidebar_state="expanded")
     st.title("🏌️ ゴルフスイング分析")
     st.caption("Python / Streamlit版・簡単操作版　｜　動画選択 → 自動解析 → コマ・線を調整 → 保存")
+    st.caption("撮影アングル・線の表示設定は左側の「管理線の設定」にあります。見えない場合は画面左上の「＞」または「≫」で開いてください。")
     if "enabled_lines" not in st.session_state:st.session_state["enabled_lines"]=DEFAULT_LINES[:]
     if "camera_mode" not in st.session_state:st.session_state["camera_mode"]="back"
     if "styles" not in st.session_state:st.session_state["styles"]={k:{"color":c,"width":3,"dash":"dashed" if k=="hip" else "solid","positions":[]} for k,c in COLORS.items()}
