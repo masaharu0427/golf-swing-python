@@ -30,8 +30,13 @@ P_CODES = [f"P{i}" for i in range(1, 11)]
 P_NAMES = dict(zip(P_CODES, ["アドレス", "テイクバック", "ハーフウェイバック", "トップ", "切り返し", "デリバリー", "インパクト", "フォロー", "ハイフォロー", "フィニッシュ"]))
 LINE_NAMES = {"head":"頭の円（追従＋P1基準）", "spine":"胸と腰の中心線（前傾角）", "tilt":"胸と腰の傾き（正面）", "shoulders":"両肩のライン", "shaft":"シャフトプレーン", "hip":"ヒップライン", "ankles":"両足首の垂線", "vertical":"腰中心の垂直基準線", "back_vertical":"垂直基準線（身長程度）", "hip_right_knee":"腰の中心〜右ひざの中心"}
 COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0FDE32", "shaft":"#FFFFFF", "hip":"#FFCC55", "ankles":"#FFFF00", "vertical":"#43D9E6", "back_vertical":"#FFFFFF", "hip_right_knee":"#FFFF00"}
+LINE_NAMES["right_leg_outer"] = "右脚の外側（外くるぶし〜太ももの付け根）"
+COLORS["right_leg_outer"] = "#1BC4D4"
 REAR_ONLY_LINES = ("back_vertical", "hip_right_knee")
+FRONT_ONLY_LINES = ("right_leg_outer",)
 DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES]
+FRONT_DEFAULT_LINES = ["head", "tilt", "shoulders", "ankles", *FRONT_ONLY_LINES]
+RIGHT_LEG_POINTS = ("right_ankle_outer", "right_thigh_outer")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
 
 
@@ -89,7 +94,21 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
     # 鼻だけでなく両耳も使い、正面・後方で頭の中心が極端にずれないようにする。
     head = [(lm[0].x+lm[7].x+lm[8].x)/3, (lm[0].y+lm[7].y+lm[8].y)/3]
     ear_width = math.hypot(lm[7].x-lm[8].x, (lm[7].y-lm[8].y)*height/width)
-    return {"head":head, "radius":max(.018, min(.10, ear_width*.75)), "ls":point(11), "rs":point(12), "sh":mid(11,12), "hip":mid(23,24), "rk":point(26), "wr":mid(15,16), "la":point(27), "ra":point(28)}
+    left_hip, right_hip = point(23), point(24)
+    left_ankle, right_ankle = point(27), point(28)
+    pose = {"head":head, "radius":max(.018, min(.10, ear_width*.75)), "ls":point(11), "rs":point(12), "sh":mid(11,12), "hip":mid(23,24), "rk":point(26), "wr":mid(15,16), "la":left_ankle, "ra":right_ankle}
+    if all(valid_point(p) for p in (left_hip, right_hip, right_ankle)):
+        # Pose landmarks are joint centers. Offset the endpoints toward the
+        # outer edge in screen space to give the user an adjustable estimate.
+        hip_delta = right_hip[0] - left_hip[0]
+        leg_scale = abs(right_ankle[1] - right_hip[1]) * height / width
+        side = hip_delta if abs(hip_delta) >= .04 * leg_scale else right_ankle[0] - left_ankle[0]
+        outward = 1 if side > 0 else -1
+        span = max(abs(hip_delta), .35 * leg_scale)
+        for key, point_xy, factor in zip(RIGHT_LEG_POINTS, (right_ankle, right_hip), (.08, .22)):
+            x, y = point_xy
+            pose[key] = [min(1., max(0., x + outward * span * factor)), y]
+    return pose
 
 
 def analyze_skeleton(path: Path, info: dict, progress=None) -> list:
@@ -200,10 +219,12 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
             out.append({"type":"line","id":"p1_spine_reference","a":ref["hip"][:],"b":ref["sh"][:],"angle":False,"color":"#FFFFFF","width":2,"dash":"dashed"})
     def add_line(code,a,b,angle=False,vertical=False):
         out.append({"type":"line","id":code,"a":a,"b":b,"angle":angle,"vertical":vertical,**cfg[code]})
+    front = job.get("camera_mode") == "front"
+    hidden_lines = REAR_ONLY_LINES if front else FRONT_ONLY_LINES
     for code,s in cfg.items():
-        if not s["enabled"] or not in_positions(frame,s["positions"],job["p_frames"]):
+        if not s["enabled"] or (code != "right_leg_outer" and not in_positions(frame,s["positions"],job["p_frames"])):
             continue
-        if code in REAR_ONLY_LINES and job.get("camera_mode") == "front":
+        if code in hidden_lines:
             continue
         if code == "head" and g.get("head"):
             out.append({**s,"type":"circle","id":"head_reference","center":g["head"][:],"radius":g["radius"],"dash":"dashed"})
@@ -240,6 +261,11 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
             add_line(code, [x, top], [x, bottom])
         elif code == "hip_right_knee" and body and valid_point(body.get("rk")):
             add_line(code, body["hip"], body["rk"], angle=True)
+        elif code == "right_leg_outer" and body:
+            frames = job["p_frames"]
+            if frames["P1"] <= frame <= frames["P4"] and all(valid_point(body.get(k)) for k in RIGHT_LEG_POINTS):
+                ankle, thigh = RIGHT_LEG_POINTS
+                add_line(code, body[ankle], body[thigh])
     for shape in job["shapes"]:
         target = shape.get("target_p")
         if (target and job["p_frames"].get(target) == frame) or (not target and in_positions(frame,custom_positions or [],job["p_frames"])):
@@ -421,8 +447,9 @@ def accept_editor_event(job: dict,event: dict | None,phase: str,frame: int) -> b
     if isinstance(body,dict) and all(valid_point(body.get(k)) for k in ["ls","rs","sh","hip"]):
         baseline=get_pose(job,frame,phase) or {}
         updated = {k: body[k] for k in ("ls", "rs", "sh", "hip")}
-        if valid_point(body.get("rk")):
-            updated["rk"] = body["rk"]
+        for key in ("rk", *RIGHT_LEG_POINTS):
+            if valid_point(body.get(key)):
+                updated[key] = body[key]
         job["body_overrides"][phase] = {**baseline, **updated}
         changed = True
     shapes=event.get("shapes")
@@ -463,11 +490,11 @@ function height(){const h=Math.ceil($('root').getBoundingClientRect().height)+8;
 function visible(s){return s.target_p?s.target_p===args.phase:args.custom_visible!==false;}
 function style(s){ctx.strokeStyle=s.color||'#ffff00';ctx.lineWidth=Math.max(1,(s.width||3)*canvas.height/1080);ctx.lineCap=s.dash==='dashed'?'butt':'round';ctx.lineJoin='round';const dash=Math.max(2,4*canvas.height/1080);ctx.setLineDash(s.dash==='dashed'?[dash,dash]:[]);}
 function text(label,p,color,angle=false){ctx.save();ctx.font=`bold ${angle?Math.max(14,canvas.height*26/1080):Math.max(18,canvas.height*.03)}px sans-serif`;ctx.lineWidth=angle?2:3;ctx.strokeStyle='#101c17';ctx.fillStyle=color;ctx.setLineDash([]);const x=clamp(p[0],0,.88)*canvas.width,y=clamp(p[1],.03,.97)*canvas.height;ctx.strokeText(label,x,y);ctx.fillText(label,x,y);ctx.restore();}
-function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaft;s.a=a;s.b=[a[0]+(b[0]-a[0])*2.2,a[1]+(b[1]-a[1])*2.2];s.label_pos=[a[0]+(b[0]-a[0])*.45+.014,a[1]+(b[1]-a[1])*.45+.015];}if(s.id==='hip'){s.a=[g.hip,g.top];s.b=[g.hip,g.bottom];}if(s.id==='vertical'){s.a=[g.vertical,g.top];s.b=[g.vertical,g.bottom];}if(s.id==='back_vertical'){s.a[0]=s.b[0]=g.back_vertical;}if(s.id==='ankles'){s.a=[g.ankles[s.part],g.top];s.b=[g.ankles[s.part],g.bottom];}if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
+function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaft;s.a=a;s.b=[a[0]+(b[0]-a[0])*2.2,a[1]+(b[1]-a[1])*2.2];s.label_pos=[a[0]+(b[0]-a[0])*.45+.014,a[1]+(b[1]-a[1])*.45+.015];}if(s.id==='hip'){s.a=[g.hip,g.top];s.b=[g.hip,g.bottom];}if(s.id==='vertical'){s.a=[g.vertical,g.top];s.b=[g.vertical,g.bottom];}if(s.id==='back_vertical'){s.a[0]=s.b[0]=g.back_vertical;}if(s.id==='ankles'){s.a=[g.ankles[s.part],g.top];s.b=[g.ankles[s.part],g.bottom];}if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='right_leg_outer'){s.a=body.right_ankle_outer;s.b=body.right_thigh_outer;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
 function draw(s){ctx.save();style(s);ctx.beginPath();if(s.type==='line'){ctx.moveTo(s.a[0]*canvas.width,s.a[1]*canvas.height);ctx.lineTo(s.b[0]*canvas.width,s.b[1]*canvas.height);}else if(s.type==='circle'&&s.center){ctx.arc(s.center[0]*canvas.width,s.center[1]*canvas.height,s.radius*canvas.width,0,Math.PI*2);}else if(s.type==='free'){s.points.forEach((p,i)=>i?ctx.lineTo(p[0]*canvas.width,p[1]*canvas.height):ctx.moveTo(p[0]*canvas.width,p[1]*canvas.height));}ctx.stroke();ctx.restore();if(s.type==='line'&&s.angle){let a=Math.round(Math.atan2(Math.abs((s.b[1]-s.a[1])*canvas.height),Math.abs((s.b[0]-s.a[0])*canvas.width))*180/Math.PI);if(s.vertical){const dx=(s.b[0]-s.a[0])*canvas.width,dy=(s.b[1]-s.a[1])*canvas.height;a=Math.round(Math.atan2(Math.abs(dx),Math.abs(dy))*180/Math.PI);if(dx*(s.target_dir||-1)<0)a=-a;}text(a+'°',s.label_pos||[(s.a[0]+s.b[0])/2+.014,(s.a[1]+s.b[1])/2-.01],s.color,true);}}
 function handles(){const out=[],shown=id=>args.primitives.some(s=>s.id===id);const add=(p,type,key,extra={})=>{if(p)out.push({p,type,key,...extra});};if(shown('shaft'))g.shaft.forEach((p,i)=>add(p,'shaft',i,{label:i===0?'ヘッド側':'グリップ側',color:i===0?'#58d6ef':'#e9f38a'}));if(shown('hip'))add([g.hip,(g.top+g.bottom)/2],'hip',null,{label:'ヒップ',color:'#ffbf69'});
 if(args.active_line==='head'&&shown('head_reference')&&g.head){add(g.head,'head');add([g.head[0]+g.radius,g.head[1]],'radius');}if(args.active_line==='vertical'&&shown('vertical'))add([g.vertical,(g.top+g.bottom)/2],'vertical');if(args.active_line==='back_vertical'&&shown('back_vertical')){const s=args.primitives.find(p=>p.id==='back_vertical');add([g.back_vertical,(s.a[1]+s.b[1])/2],'back_vertical');}if(args.active_line==='ankles'&&shown('ankles'))g.ankles.forEach((x,i)=>add([x,(g.top+g.bottom)/2],'ankles',i));
-if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)){add(body.sh,'body','sh');add(body.hip,'body','hip');}if(args.active_line==='shoulders'&&shown('shoulders')){add(body.ls,'body','ls');add(body.rs,'body','rs');}if(args.active_line==='hip_right_knee'&&shown('hip_right_knee')){add(body.hip,'body','hip');add(body.rk,'body','rk');}}
+if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)){add(body.sh,'body','sh');add(body.hip,'body','hip');}if(args.active_line==='shoulders'&&shown('shoulders')){add(body.ls,'body','ls');add(body.rs,'body','rs');}if(args.active_line==='hip_right_knee'&&shown('hip_right_knee')){add(body.hip,'body','hip');add(body.rk,'body','rk');}if(args.active_line==='right_leg_outer'&&shown('right_leg_outer')){add(body.right_ankle_outer,'body','right_ankle_outer');add(body.right_thigh_outer,'body','right_thigh_outer');}}
 shapes.forEach((s,i)=>{if(!visible(s))return;if(s.type==='line'){add(s.a,'custom',i,{end:'a'});add(s.b,'custom',i,{end:'b'});}if(s.type==='circle'){add(s.center,'custom',i,{end:'center'});add([s.center[0]+s.radius,s.center[1]],'custom',i,{end:'radius'});}if(s.type==='free'&&s.points.length)add(s.points[0],'custom',i,{end:'free'});});return out;}
 function drawSportsbox(label){
     if(!label)return;
@@ -628,7 +655,7 @@ def clear_outputs():
 
 def switch_mode(front=False):
     st.session_state["camera_mode"]="front" if front else "back"
-    st.session_state["enabled_lines"]=["head","tilt","shoulders","ankles"] if front else DEFAULT_LINES[:]
+    st.session_state["enabled_lines"]=(FRONT_DEFAULT_LINES if front else DEFAULT_LINES)[:]
     clear_outputs()
 
 
@@ -644,18 +671,20 @@ def step_frame(code,widget,delta):
     job=st.session_state["job"];st.session_state[widget]=max(0,min(job["info"]["frames"]-1,int(st.session_state[widget])+delta));frame_change(code,widget)
 
 
-def refresh_right_knee(job: dict, progress) -> int:
+def refresh_pose_points(job: dict, keys: tuple, progress) -> int:
     detected = analyze_skeleton(Path(job["path"]), job["info"], progress)
     updates = 0
     for index, new_pose in enumerate(detected[:len(job["poses"])]):
-        if new_pose and valid_point(new_pose.get("rk")):
-            pose = job["poses"][index]
-            job["poses"][index] = {**pose, "rk": new_pose["rk"]} if pose else new_pose
+        if new_pose and all(valid_point(new_pose.get(key)) for key in keys):
+            pose = job["poses"][index] or new_pose
+            job["poses"][index] = {**pose, **{key: new_pose[key] for key in keys}}
             updates += 1
     for code, body in job["body_overrides"].items():
         pose = job["poses"][job["p_frames"][code]]
-        if pose and "rk" in pose:
-            body.setdefault("rk", pose["rk"])
+        if pose:
+            for key in keys:
+                if key in pose:
+                    body.setdefault(key, pose[key])
     if updates:
         clear_outputs()
     return updates
@@ -1070,13 +1099,16 @@ def render_app():
     st.title("🏌️ ゴルフスイング分析")
     st.caption("Python / Streamlit版・簡単操作版　｜　動画選択 → 自動解析 → コマ・線を調整 → 保存")
     st.caption("撮影アングル・線の表示設定は左側の「管理線の設定」にあります。見えない場合は画面左上の「＞」または「≫」で開いてください。")
-    if "enabled_lines" not in st.session_state:st.session_state["enabled_lines"]=DEFAULT_LINES[:]
     if "camera_mode" not in st.session_state:st.session_state["camera_mode"]="back"
     styles = st.session_state.setdefault("styles", {})
     rear_mode = st.session_state["camera_mode"] == "back"
+    st.session_state.setdefault("enabled_lines", (DEFAULT_LINES if rear_mode else FRONT_DEFAULT_LINES)[:])
     if styles and "back_vertical" not in styles and rear_mode:
         current_lines = st.session_state["enabled_lines"]
         st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, *REAR_ONLY_LINES]))
+    if styles and "right_leg_outer" not in styles and not rear_mode:
+        current_lines = st.session_state["enabled_lines"]
+        st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, *FRONT_ONLY_LINES]))
     for key, color in COLORS.items():
         styles.setdefault(key, {"color":color, "width":3, "dash":"dashed" if key in ("hip", "back_vertical") else "solid", "positions":[]})
     if not st.session_state.get("back_vertical_dash_initialized"):
@@ -1093,7 +1125,8 @@ def render_app():
         a,b=st.columns(2)
         a.button("後方撮影",on_click=switch_mode,args=(False,),use_container_width=True)
         b.button("正面撮影",on_click=switch_mode,args=(True,),use_container_width=True)
-        available = [key for key in LINE_NAMES if rear_mode or key not in REAR_ONLY_LINES]
+        unavailable = FRONT_ONLY_LINES if rear_mode else REAR_ONLY_LINES
+        available = [key for key in LINE_NAMES if key not in unavailable]
         enabled=st.multiselect("表示する線",available,format_func=lambda k:LINE_NAMES[k],key="enabled_lines",on_change=clear_outputs)
         st.caption("線はプレビュー上の丸、またはシャフト・ヒップの線をドラッグして動かせます。")
         if st.session_state["camera_mode"]=="back":
@@ -1170,25 +1203,32 @@ def render_app():
     if line=="tilt":st.caption("白い点線が垂直＝0°です。胸が腰より目標側なら正、反対側ならマイナスで表示します。目標方向は左側の管理線設定で変更できます。")
     if line == "back_vertical":
         st.caption("P1の頭頂から足元までを目安にした垂直線です。丸をドラッグすると左右に移動します。")
-    if "hip_right_knee" in enabled:
-        if not any(pose and valid_point(pose.get("rk")) for pose in job["poses"]):
-            if st.button("編集中の動画で右ひざを検出"):
-                progress = st.progress(0, text="右ひざを検出しています…")
+    for line_code, points, part in (
+        ("hip_right_knee", ("rk",), "右ひざ"),
+        ("right_leg_outer", RIGHT_LEG_POINTS, "右脚の外側の位置"),
+    ):
+        if line_code not in enabled:
+            continue
+        if not any(pose and all(valid_point(pose.get(key)) for key in points) for pose in job["poses"]):
+            if st.button(f"編集中の動画で{part}を検出"):
+                progress = st.progress(0, text=f"{part}を検出しています…")
                 try:
-                    found = refresh_right_knee(job, lambda value, text: progress.progress(value, text=text))
+                    found = refresh_pose_points(job, points, lambda value, text: progress.progress(value, text=text))
                     if found:
-                        st.success(f"{found}コマで右ひざを検出しました。")
+                        st.success(f"{found}コマで{part}を検出しました。")
                     else:
-                        st.info("右ひざを検出できませんでした。")
+                        st.info(f"{part}を検出できませんでした。")
                 except Exception as exc:
-                    st.error(f"右ひざを検出できませんでした。{exc}")
+                    st.error(f"{part}を検出できませんでした。{exc}")
                 finally:
                     progress.empty()
-        if line == "hip_right_knee":
-            st.caption("右ひざを検出したコマに、画面の水平線（0°）に対する角度を表示します。腰側とひざ側の丸をドラッグして調整できます。")
+    if line == "hip_right_knee":
+        st.caption("右ひざを検出したコマに、画面の水平線（0°）に対する角度を表示します。腰側とひざ側の丸をドラッグして調整できます。")
+    if line == "right_leg_outer":
+        st.caption("P1〜P4の区間に表示します。外くるぶし側と太ももの付け根側を、丸をドラッグして調整できます。")
     with st.expander("点線・表示するPを変更"):
         style["dash"]=st.selectbox("種類",["solid","dashed"],index=["solid","dashed"].index(style["dash"]),format_func=lambda x:"実線" if x=="solid" else "点線",key=f"dash_{line}",on_change=clear_outputs)
-        if line!="shoulders":
+        if line not in ("shoulders", "right_leg_outer"):
             style["positions"]=st.multiselect("この線を表示するポジション（複数選択可）",P_CODES,default=style["positions"],key=f"positions_{line}",help="未選択なら全フレームに表示します。",on_change=clear_outputs)
     if "shoulders" in enabled:
         shoulder_style=st.session_state["styles"]["shoulders"]
