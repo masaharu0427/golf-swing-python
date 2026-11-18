@@ -22,7 +22,7 @@ import zipfile
 import cv2
 import imageio_ffmpeg
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import streamlit as st
 from streamlit.components.v1 import declare_component
 
@@ -507,25 +507,25 @@ def editor_component():
     return declare_component("golf_simple_drag_editor",path=str(folder))
 
 
-ANDROID_UPLOAD_HTML = r"""<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+MOBILE_UPLOAD_HTML = r"""<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{margin:0;font-family:Arial,'Yu Gothic',sans-serif;color:#19382c}*{box-sizing:border-box}.box{padding:12px;background:#f0f4ef;border:1px solid #cbd5c6;border-radius:8px}button{font:inherit;padding:12px;border:1px solid #9caf98;border-radius:6px;background:white;color:#19382c;cursor:pointer;margin:4px 4px 4px 0}button:disabled{opacity:.45;cursor:default}#send{background:#247052;color:white}#name{margin:10px 0;overflow-wrap:anywhere;font-weight:bold}#status{font-size:14px;line-height:1.6;white-space:pre-wrap}progress{width:100%;height:18px}small{display:block;margin:8px 0;color:#52644c;line-height:1.6}
-</style><div class="box" id="root"><button id="choose">① ファイルから動画を選ぶ</button><button id="gallery">写真・動画から選ぶ</button><input type="file" id="files" hidden><input type="file" id="videos" accept="video/*" hidden><div id="name">動画はまだ選ばれていません</div><button id="send" disabled>② 動画を送信</button><progress id="progress" value="0" max="100"></progress><div id="status" role="status">端末内に保存した動画を選んでください（200MBまで）</div><small>動画名が出たら「② 動画を送信」を押してください。受信完了後、下の「動画を読み込んで解析」を押します。</small></div><script>
+</style><div class="box" id="root"><button id="choose">① ファイルから__MEDIA__を選ぶ</button><button id="gallery">__GALLERY__</button><input type="file" id="files" hidden><input type="file" id="videos" accept="__ACCEPT__" hidden><div id="name">__MEDIA__はまだ選ばれていません</div><button id="send" disabled>② __MEDIA__を送信</button><progress id="progress" value="0" max="100"></progress><div id="status" role="status">端末内に保存した__MEDIA__を選んでください（__LIMIT__MBまで）</div><small>__MEDIA__名が出たら「② __MEDIA__を送信」を押してください__AFTER_SEND__</small></div><script>
 const $=id=>document.getElementById(id);let file=null,busy=false,args={},pending=null,picker=false;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*');}
 function height(){post('streamlit:setFrameHeight',{height:Math.ceil($('root').getBoundingClientRect().height)+8});}
 function status(t){$('status').textContent=t;height();}
 function controls(){for(const id of ['choose','gallery','files','videos'])$(id).disabled=busy;$('send').disabled=busy||!file;}
-for(const [button,input] of [['choose','files'],['gallery','videos']]){$(button).onclick=()=>{picker=true;$(input).value='';$(input).click();};$(input).onchange=()=>{picker=false;const f=$(input).files[0];if(!f)return;file=f;$('name').textContent=f.name+'（'+(f.size/1048576).toFixed(1)+' MB）';$('progress').value=0;if(!f.size||f.size>200*1048576){file=null;status('空の動画、または200MBを超える動画です。別の動画を選んでください。');}else status('動画を選択しました。「② 動画を送信」を押してください。');controls();height();};}
-window.addEventListener('focus',()=>{if(picker)setTimeout(()=>{if(picker){picker=false;status('動画名がまだ返っていません。「① ファイルから動画を選ぶ」で端末内の動画を選んでください。');}},2000);});
+for(const [button,input] of [['choose','files'],['gallery','videos']]){$(button).onclick=()=>{picker=true;$(input).value='';$(input).click();};$(input).onchange=()=>{picker=false;const f=$(input).files[0];if(!f)return;file=f;$('name').textContent=f.name+'（'+(f.size/1048576).toFixed(1)+' MB）';$('progress').value=0;if(!f.size||f.size>__LIMIT__*1048576){file=null;status('空の__MEDIA__、または__LIMIT__MBを超える__MEDIA__です。別の__MEDIA__を選んでください。');}else status('__MEDIA__を選択しました。「② __MEDIA__を送信」を押してください。');controls();height();};}
+window.addEventListener('focus',()=>{if(picker)setTimeout(()=>{if(picker){picker=false;status('__MEDIA__名がまだ返っていません。「① ファイルから__MEDIA__を選ぶ」で端末内の__MEDIA__を選んでください。');}},2000);});
 function send(value,expected){return new Promise((resolve,reject)=>{let attempts=0;const transmit=()=>{post('streamlit:setComponentValue',{dataType:'json',value});};const timer=setInterval(()=>{if(++attempts>=3){clearInterval(timer);pending=null;reject(Error('応答がありません。アプリを開き直してから、もう一度送信してください。'));}else{status('接続を確認して再送しています…');transmit();}},15000);pending={id:value.id,expected,resolve:()=>{clearInterval(timer);pending=null;resolve();},reject:e=>{clearInterval(timer);pending=null;reject(Error(e));}};transmit();});}
-function read(slice){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(Error('この動画を端末から読み出せません。端末内へ保存した動画で試してください。'));r.readAsDataURL(slice);});}
-$('send').onclick=async()=>{if(!file||busy)return;const chosen=file,id=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);busy=true;controls();try{status('送信を開始しています…');await send({kind:'begin',id,name:chosen.name,size:chosen.size},0);let seq=0;for(let offset=0;offset<chosen.size;offset+=262144){const end=Math.min(chosen.size,offset+262144),data=await read(chosen.slice(offset,end));status('動画を送信中… '+Math.floor(offset/chosen.size*100)+'%');await send({kind:'chunk',id,seq,data},seq+1);seq++;$('progress').value=Math.round(end/chosen.size*100);}status('受信完了。下の「動画を読み込んで解析」を押してください。');}catch(e){status(e.message);}finally{busy=false;controls();}};
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data.type!=='streamlit:render')return;args=e.data.args||{};if(pending&&args.transfer_id===pending.id){if(args.error)pending.reject(args.error);else if(args.next_seq>=pending.expected)pending.resolve();}if(!file&&args.complete){$('name').textContent='受信済み：'+args.name;$('progress').value=100;status('受信完了。下の「動画を読み込んで解析」を押してください。');}height();});
+function read(slice){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(Error('この__MEDIA__を端末から読み出せません。端末内へ保存した__MEDIA__で試してください。'));r.readAsDataURL(slice);});}
+$('send').onclick=async()=>{if(!file||busy)return;const chosen=file,id=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);busy=true;controls();try{status('送信を開始しています…');await send({kind:'begin',id,name:chosen.name,size:chosen.size},0);let seq=0;for(let offset=0;offset<chosen.size;offset+=262144){const end=Math.min(chosen.size,offset+262144),data=await read(chosen.slice(offset,end));status('__MEDIA__を送信中… '+Math.floor(offset/chosen.size*100)+'%');await send({kind:'chunk',id,seq,data},seq+1);seq++;$('progress').value=Math.round(end/chosen.size*100);}status('受信完了__AFTER_SEND__');}catch(e){status(e.message);}finally{busy=false;controls();}};
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data.type!=='streamlit:render')return;args=e.data.args||{};if(pending&&args.transfer_id===pending.id){if(args.error)pending.reject(args.error);else if(args.next_seq>=pending.expected)pending.resolve();}if(!file&&args.complete){$('name').textContent='受信済み：'+args.name;$('progress').value=100;status('受信完了__AFTER_SEND__');}height();});
 new ResizeObserver(height).observe($('root'));post('streamlit:componentReady',{apiVersion:1});height();
 </script></html>"""
 
 
-def accept_android_upload(state: dict, event) -> bool:
+def accept_mobile_upload(state: dict, event, size_limit_mb: int) -> bool:
     if not isinstance(event,dict):return False
     transfer_id=event.get("id")
     if not isinstance(transfer_id,str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}",transfer_id):return False
@@ -533,7 +533,7 @@ def accept_android_upload(state: dict, event) -> bool:
     if kind=="begin":
         if state.get("id")==transfer_id:return False
         size=event.get("size");name=event.get("name")
-        if not isinstance(size,int) or isinstance(size,bool) or not 0<size<=200*1024*1024:return False
+        if not isinstance(size,int) or isinstance(size,bool) or not 0<size<=size_limit_mb*1024*1024:return False
         if not isinstance(name,str) or not 0<len(name)<=512:return False
         state.clear();state.update(id=transfer_id,name=name,size=size,data=bytearray(),next_seq=0,complete=False,error=None)
         return True
@@ -545,28 +545,51 @@ def accept_android_upload(state: dict, event) -> bool:
         if not isinstance(encoded,str) or len(encoded)>349528:raise ValueError("送信データのサイズが不正です。")
         chunk=base64.b64decode(encoded,validate=True)
         expected=min(262144,state["size"]-len(state["data"]))
-        if not expected or len(chunk)!=expected:raise ValueError("動画の一部を受信できませんでした。もう一度動画を選んで送信してください。")
+        if not expected or len(chunk)!=expected:raise ValueError("ファイルの一部を受信できませんでした。もう一度ファイルを選んで送信してください。")
         state["data"].extend(chunk);state["next_seq"]+=1
         state["complete"]=len(state["data"])==state["size"]
     except (ValueError,TypeError) as exc:state["error"]=str(exc)
     return True
 
 
-class AndroidVideo:
-    def __init__(self,state):self.name=state["name"];self.size=state["size"];self.data=state["data"]
-    def getbuffer(self):return memoryview(self.data)
+class MobileUpload:
+    def __init__(self, state: dict):
+        self.name = state["name"]
+        self.size = state["size"]
+        self.file_id = state["id"]
+        self.data = state["data"]
+
+    def getbuffer(self):
+        return memoryview(self.data)
 
 
-def android_upload():
-    folder=Path(tempfile.gettempdir())/("golf_android_upload_"+hashlib.sha256(ANDROID_UPLOAD_HTML.encode()).hexdigest()[:16])
-    folder.mkdir(exist_ok=True);index=folder/"index.html"
-    if not index.exists():index.write_text(ANDROID_UPLOAD_HTML,encoding="utf-8")
-    component=declare_component("golf_android_upload",path=str(folder))
-    state=st.session_state.setdefault("android_upload_state",{})
-    event=component(transfer_id=state.get("id"),next_seq=state.get("next_seq",-1),complete=state.get("complete",False),error=state.get("error"),name=state.get("name",""),key="android_upload_widget",default=None)
-    if accept_android_upload(state,event):st.rerun()
-    if state.get("error"):st.error(state["error"])
-    return AndroidVideo(state) if state.get("complete") and not state.get("error") else None
+def mobile_upload(kind: str, state: dict, key: str) -> MobileUpload | None:
+    image = kind == "image"
+    limit = 15 if image else 200
+    media = "画像" if image else "動画"
+    html = (MOBILE_UPLOAD_HTML.replace("__MEDIA__", media)
+            .replace("__LIMIT__", str(limit))
+            .replace("__GALLERY__", "写真から選ぶ" if image else "写真・動画から選ぶ")
+            .replace("__ACCEPT__", "image/*" if image else "video/*")
+            .replace("__AFTER_SEND__", "。下に読み取り結果が表示されます。" if image else "。下の「動画を読み込んで解析」を押してください。"))
+    folder = Path(tempfile.gettempdir()) / ("golf_mobile_upload_" + hashlib.sha256(html.encode()).hexdigest()[:16])
+    folder.mkdir(exist_ok=True)
+    index = folder / "index.html"
+    if not index.exists():
+        index.write_text(html, encoding="utf-8")
+    component = declare_component(f"golf_mobile_upload_{kind}", path=str(folder))
+    event = component(
+        transfer_id=state.get("id"), next_seq=state.get("next_seq", -1),
+        complete=state.get("complete", False), error=state.get("error"),
+        name=state.get("name", ""), key=key, default=None,
+    )
+    if accept_mobile_upload(state, event, limit):
+        if image and event["kind"] == "begin":
+            clear_outputs()
+        st.rerun()
+    if state.get("error"):
+        st.error(state["error"])
+    return MobileUpload(state) if state.get("complete") and not state.get("error") else None
 
 
 def clear_outputs():
@@ -748,10 +771,26 @@ def _sportsbox_read_number(image, y, bounds, digit_templates):
 def read_sportsbox_angles(data):
     """Return detected values, leaving unconfirmed cells empty."""
     with Image.open(io.BytesIO(data)) as source:
-        width, height = source.size
-        if height < 460 or width * height > 20_000_000 or abs(width / height - 2048 / 946) > .035:
-            raise ValueError("見本と同じ横長のTurn画面を、切り抜かずに読み込んでください。")
-        image = source.convert("RGB").resize(SPORTSBOX_REFERENCE_SIZE, SPORTSBOX_RESAMPLE)
+        if source.width * source.height > 20_000_000:
+            raise ValueError("画像が大きすぎます。横長のTurn画面のスクリーンショットを選び直してください。")
+        image = ImageOps.exif_transpose(source).convert("RGB")
+
+    width, height = image.size
+    aspect = SPORTSBOX_REFERENCE_SIZE[0] / SPORTSBOX_REFERENCE_SIZE[1]
+    if min(width, height) < 400:
+        raise ValueError("画像が小さすぎます。縮小する前のスクリーンショットを選び直してください。")
+    if abs(width / height - aspect) <= .06:
+        return _read_sportsbox_layout(image)
+    if abs(height / width - aspect) <= .06:
+        # Some phones save a landscape capture as a sideways portrait image.
+        candidates = (_read_sportsbox_layout(image.transpose(turn))
+                      for turn in (Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_270))
+        return max(candidates, key=lambda values: sum(map(len, values.values())))
+    raise ValueError("画像は見本と同じ横長のTurn画面にしてください。Chest TurnとPelvis Turnの両方が入る状態で撮影してください。")
+
+
+def _read_sportsbox_layout(image):
+    image = image.resize(SPORTSBOX_REFERENCE_SIZE, SPORTSBOX_RESAMPLE)
 
     templates = SPORTSBOX_GLYPH_TEMPLATES
     values = {code: {} for code in SPORTSBOX_POSITIONS}
@@ -779,32 +818,59 @@ def sportsbox_settings(job: dict) -> None:
     if not st.checkbox("Sportsboxの回転角を表示する（オプション）", key=f"sportsbox_enabled_{token}", on_change=clear_outputs):
         return
 
-    screenshot = st.file_uploader(
-        "同じスイングのSportsbox画像を選択",
-        type=["png", "jpg", "jpeg"],
-        key=f"sportsbox_file_{token}",
-        on_change=clear_outputs,
-        help="見本と同じ横長のTurn画面を使用してください。DAHの次のカードをIMPACTとして読み取ります。",
+    user_agent = st.context.headers.get("User-Agent", "")
+    default_mobile = bool(re.search(r"Android|iPhone|iPad|iPod|Mobile", user_agent, re.I))
+    methods = ("通常", "スマホ向け（分割送信）", "手入力")
+    method = st.radio(
+        "Sportsboxの入力方法", methods, index=int(default_mobile),
+        key=f"sportsbox_method_{token}", horizontal=True, on_change=clear_outputs,
     )
-    if screenshot is None:
-        job.pop("sportsbox_import", None)
+    if method == "スマホ向け（分割送信）":
+        transport = job.setdefault("sportsbox_upload", {})
+        screenshot = mobile_upload("image", transport, f"sportsbox_mobile_{token}")
+    elif method == "通常":
+        screenshot = st.file_uploader(
+            "同じスイングのSportsbox画像を選択",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"sportsbox_file_{token}", on_change=clear_outputs,
+            help="見本と同じ横長のTurn画面を使用してください。DAHの次のカードをIMPACTとして読み取ります。",
+        )
+    else:
+        screenshot = None
+
+    if method == "手入力":
+        source_id = "manual"
+    elif screenshot is None:
+        if method == "通常":
+            job.pop("sportsbox_import", None)
         return
+    else:
+        source_id = screenshot.file_id
+        st.caption(f"画像を受信しました　{screenshot.name}")
 
     state = job.get("sportsbox_import")
-    if state is None or state["id"] != screenshot.file_id:
-        with st.spinner("Sportsbox画像から回転角を読み取っています…"):
-            error = None
-            try:
-                values = read_sportsbox_angles(screenshot.getvalue())
-            except ValueError as exc:
-                error, values = str(exc), {}
-            except (OSError, Image.DecompressionBombError):
-                error, values = "画像を開けませんでした。PNGまたはJPEGを選び直してください。", {}
-            state = {"id": screenshot.file_id, "values": values, "error": error}
-            job["sportsbox_import"] = state
+    if state is None or state["id"] != source_id:
+        error = None
+        values = {}
+        if screenshot is not None:
+            with st.spinner("Sportsbox画像から回転角を読み取っています…"):
+                try:
+                    values = read_sportsbox_angles(screenshot.getbuffer())
+                except ValueError as exc:
+                    error = str(exc)
+                except (OSError, Image.DecompressionBombError):
+                    error = "画像を開けませんでした。端末のスクリーンショットをPNGまたはJPEGで選び直してください。"
+        state = {"id": source_id, "values": values, "error": error, "read_count": sum(map(len, values.values()))}
+        job["sportsbox_import"] = state
 
     if state["error"]:
         st.warning(state["error"])
+    elif screenshot is not None:
+        count = state["read_count"]
+        if count:
+            st.caption(f"画像から読み取った値　{count} / 6")
+        else:
+            st.warning("画像は受信できましたが、回転角を読み取れませんでした。見本と同じTurn画面を選ぶか、下の欄に入力してください。")
     st.caption("画像と数値を照合し、必要に応じて修正してください。両方の角度がそろったポジションに表示します。")
     values = {}
     for col, (code, position) in zip(st.columns(3), SPORTSBOX_POSITIONS.items()):
@@ -815,7 +881,7 @@ def sportsbox_settings(job: dict) -> None:
                 f"{name}の回転角（°）", min_value=-180, max_value=180,
                 value=state["values"].get(code, {}).get(metric), step=1, format="%d",
                 placeholder="未読取",
-                key=f"sportsbox_{token}_{screenshot.file_id}_{code}_{metric}", on_change=clear_outputs,
+                key=f"sportsbox_{token}_{source_id}_{code}_{metric}", on_change=clear_outputs,
             )
     state["values"] = values
     job["sportsbox_angles"] = values
@@ -850,7 +916,7 @@ def main():
     st.subheader("1. 動画を選ぶ")
     upload_method=st.radio("動画の取り込み方法",["通常（PCなど）","Android向け（分割送信）"],horizontal=True,key="upload_method")
     if upload_method=="Android向け（分割送信）":
-        uploaded=android_upload()
+        uploaded=mobile_upload("video", st.session_state.setdefault("android_upload_state", {}), "android_upload_widget")
     else:
         uploaded=st.file_uploader("動画を選択",type=None,help="ファイル名が出ない場合は、上の「Android向け（分割送信）」を選んでください。")
     if uploaded is not None:
