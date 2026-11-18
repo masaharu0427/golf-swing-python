@@ -25,7 +25,6 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import streamlit as st
 from streamlit.components.v1 import declare_component
-from sportsbox import METRICS as SPORTSBOX_METRICS, POSITIONS as SPORTSBOX_POSITIONS, read_angles
 
 P_CODES = [f"P{i}" for i in range(1, 11)]
 P_NAMES = dict(zip(P_CODES, ["アドレス", "テイクバック", "ハーフウェイバック", "トップ", "切り返し", "デリバリー", "インパクト", "フォロー", "ハイフォロー", "フィニッシュ"]))
@@ -593,6 +592,187 @@ def step_frame(code,widget,delta):
     job=st.session_state["job"];st.session_state[widget]=max(0,min(job["info"]["frames"]-1,int(st.session_state[widget])+delta));frame_change(code,widget)
 
 
+# Sportsbox Turn screenshot recognition.
+SPORTSBOX_POSITIONS = {"P1": "Address", "P4": "TOP", "P7": "IMPACT"}
+SPORTSBOX_METRICS = {"chest": "胸", "pelvis": "骨盤"}
+SPORTSBOX_REFERENCE_SIZE = (2048, 946)
+# Address, Top, and the first card immediately after DAH (Impact).
+# Coordinates are for the reference Turn screen, excluding the LIVE column.
+SPORTSBOX_ROWS = {
+    "chest": (355, [(639, 929), (1260, 1550), (1881, 2171)], 274),
+    "pelvis": (722, [(630, 920), (1252, 1542), (1873, 2163)], 641),
+}
+SPORTSBOX_BADGES = {
+    "chest": [(802, 280, 914, 310), (1475, 280, 1536, 310), (1786, 280, 1846, 310)],
+    "pelvis": [(794, 647, 906, 677), (1467, 647, 1528, 677), (1778, 647, 1838, 677)],
+}
+SPORTSBOX_RESAMPLE = Image.Resampling.LANCZOS
+
+
+# Packed reference masks for digits, metric titles, and position badges.
+SPORTSBOX_GLYPH_TEMPLATES = {'digits': {'0': ['03c01ff83ffc7ffe7c3e781ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff81f7c3e7ffe3ffc1ff807e0'],
+            '1': ['01ff1ffffffffffffffffcffe0ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff'],
+            '2': ['03c01ff83ffc7ffe7e3ef81ff80ff00f000f001f003f007e00fc01f803f007e00fc01f803f00ff00ffffffffffffffff',
+                  '03c01ff83ffc7ffe7e7ef81ef80ff00f000f001f003e007e00fc01f803f007e00fc01f807f00ff00ffffffffffffffff',
+                  '01800ff83ffc7ffe7e7e781ff80ff00f000f001f001f003e007e01fc03f807e00fc01f803f007e00ffffffffffffffff'],
+            '3': ['7ffe7ffe7ffe7ffe003e007c00f801f007e00ff00ffc07fe03fe003f001f001f001f181ff81ffc3e7ffe3ffc1ff807e0',
+                  '7ffe7ffe7ffe7ffe003e007c01f803f007e00ff007f807fc02fe003f001f001f001f301ff83efc7e7ffc3ffc1ff00380',
+                  '7ffe7ffe7ffe7ffe003e007c01f803f007e00ff00ff807fc00fe003e001e001f001f301ef83efc7e7ffc3ffc1ff00380',
+                  '7ffe7ffe7ffe7ffe003e007c01f803f007e00ff007f807fc02fe003f001f001f001f301ff83efc7e7ffc3ffc1ff00380',
+                  '7ffe7ffe7ffe7ffe003e007c00f803f007e00ff007fc07fe02fe001f001f001f001f101ff83ffc7e7ffe3ffc1ff803c0'],
+            '4': ['01f003e003e007c007c007800f800f801f001f003e3c3e3c7c3c7c3cf83cf83cffffffffffffffff003c003c003c003c',
+                  '01e003e003e007c007c00f800f800f001f001e003e3c3e3c7c3c7c3cf83cf83cffffffffffffffff003c003c003c003c'],
+            '5': ['3ffc3ffc3ffc7ffc780078007800780078007ff07ffc7ffe7ffe083f001f001f001f101ff81ffc3e7ffe3ffc1ff807e0',
+                  '7ffc7ffc7ffc7ffc780078007800780078807ff07ff87ffc7cfe003e001e001f001f301ff83efc7e7ffc3ffc1ff007c0'],
+            '6': ['01800ff83ffc3ff87c30f800f000f000f000f3f0fff8fffcfffef83ef81ef01ff00ff01ef81e7c3e7ffc3ffc1ff003c0'],
+            '7': ['ffffffffffffffff001f003e003e007c007c00f800f800f801f001f003e003e007e007c007c00f800f801f001f001f00'],
+            '8': ['07e01ff83ffc7ffe7e7e7c1f7c1ef81e7c3e7ffe3ffc3ffc7ffe7e7efc1ff81ff80ff80ff81f7c3f7ffe3ffc1ff80ff0'],
+            '9': ['01800ff03ffc3ffc7e3e781ef81ff00ff00ff81f781f7fff3fff3fff0fcf000f000f001f001f0c3e1ffc3ffc1ff007c0']},
+ 'chest': '3c40000003f800007e40000183f800007e40000183f80000c340000180400000c37c3873e04625aec07e7cfbe04627bf807e7cf9c046273ec06644c180462633c0667ee1804626338066fe7180462631c066e03980462633c366c01980462631c36644c98046663166666cd9804366317e667cf8e043e6313c663870e043e631',
+ 'chest_Address': ['00000000000431f1e3e7cf1e31f1f3e7cf1f31913236199379991236199379891a361810498912378e1c49891bf7cf1ec9891be6878f498913e6038779891be60181f99912661991fd9132661993c5f1f237cf9f85f1e227cf1e000000000604',
+                   '00000000040431f1e3e7cf1e31f1e3e7cf1e31913236199379991236199179891a361810498912378c1c49891bf7cf1ec9891be6878f498913e6038779891be60181f99912641991cd9132661993c5f1f237cf9f85f1e227cf1e000000000604',
+                   '00000000060c31e1e3c7cf1e31f1e3e7cf1e31913336099379991236189179991a361810498913378e1c498913f7cf1ec98913e7878f498913e6838779991be60181f99913661991dd9132661993cdf1f237cf9f85f1e227cf1e00c1c003860c',
+                   '00c1c183840830e3e3c7ce1c31f3f3e79f3e31b373641b33799b32641930599b12241830499b12279e3c498b13e79e1cc98b13e78f0e599b13e60387799b13e40183f99b326411a3fd9372661932cdf3e627df3e84f3e227cf1e00400001860c',
+                   '00000000000431f1e3e7cf1e31f1e3e7cf1e31913236199379991236199379891a361810498912378e1c49891bf7cf1ec9891be6878f498913e6038779991be60181f999126619b1fd9132661993c5f1f237cf9f85f1e227cf1e840002020604'],
+ 'chest_TOP': ['000007800000fffc1ff83ff8fffc3ffc3ffe0780703e3c0f0780f00f3c0f0781e00f3c0f0781e0073c0f0781e0073ffe0781e0073ffe0781e0073ffc0781e00f3ff00780f00f3c000780703e3c0007803ffc3c0007801ff83c00000007e00000',
+               '000007800000fffc1ff83ff8fffc3ffc3ffe0780703e3c0f0780f00f3c0f0781e00f3c0f0781e0073c0f0781e0073ffe0781e0073ffe0781e0073ffc0781e00f3ff00780f00f3c0007807c3e3c0007803ffc3c0007801ff83c00030007800000',
+               '303807e000c0fffc1ff83ff8fffc3ffc3ffe07807c3c3c1f0780f00e3c0f0781e00f3c0f0781e0073c0f0781e0073ffe0781e0073ffe0781e0073ffc0781e00f3ff00780f00f3c0007807c3e3c0007803ffc3c0007801ff83c00000007e00000',
+               '787807e007e0fffc1ff83ff87ffc3ffc3ffe07c07c3c3e1f0780f00e3c0f0781e00f3c0f0781e0073c1f0781e0073ffe0781e0073ffc0781e0073ff80781e00f3ff00780f00e3c0007807c3c3c0007803ffc3c0007801ff83c00000007e00000',
+               '000007e00000fffc1ff83ff8fffc3ffc3ffe0780703e3c0f0780f00f3c0f0781e00f3c0f0781e0073c0f0781e0073ffe0781e0073ffe0781e0073ffc0781e00f3ff00780f00f3c000780703e3c0007803ffc3c0007801ff83c00030007e01800'],
+ 'chest_DAH': ['ffc00fe0780ffff00fe0780ff0f80fc0780ff0780fe0780ff03c0ef0780ff03c1ef0780ff03c1c707ffff01c18787ffff01c18787ffff03c3c787ffff03c3ff8780ff03c3ffc780ff0787ffc780ff0f8fffc780ffff0f01e780fffe0e00f780f',
+               'ffc00fe0780fffe00fe0780ff0700fc0780ff0380ee0780ff03c0ef0780ff03c1e70780ff01c18707ffff01c18787ffff01c38787ffff03c3ff8780ff03c3ffc780ff0787f7c780ff0f8ff3c780ffff0f01c780fffe0600c780f000000040000',
+               'ffc007e0780fffe00fe0780ff0700fc0780ff0381ee0780ff03c1ef0780ff03c1cf0780ff01c18707ffff01c18787ffff01c38787ffff03c3ff8780ff03c3ffc780ff0787f7c780ff0f8ff3c780ffff0f01c780fffc0600c780f1f0000000000',
+               '1f0001000000ffc003c0780fffe00fe0780ff1f00fc0780ff03c1ff0780ff03c1cf0780ff03c18787ffff01c18787ffff01c38787ffff01c3c787ffff03c3ff8780ff03c3ff8780ff1f0fffe780fffe0f01e780fffe0e00c380f040000000000',
+               'ffc00fe0780ffff80fe0780ff0780fc0780ff0381ee0780ff03c1ef0780ff03c1e70780ff03c18707ffff01c18787ffff01c38787ffff03c3ff8780ff03c3ffc780ff07877fc780ff0f8f39c780ffff0f01e780fffe0600e780f180000002000'],
+ 'pelvis': 'f001802003f00000fc01802003f80000fc01802003f800008c01800000c00000c471a12380c4253ec6f1b127c0c467bec4d99326c0c4673fcc89932600c46633fc8d922600c46623f9fd9a2380c46423f1f99a23c0c4642381819e20c0c66423c0998e2040c66423c0f98c27c0c7e423c0f98c23c0c3e4238031042380432423',
+ 'pelvis_Address': ['39f1e3e7ce0e39f1f3e7cf1e39b9f3760d9339993b36199329899a36189129899b16181069899b37ce1869899b37cf1e6d899be7c70f6d899be601837d899b6601917c891b6618b1fc99b32619b344f9f327dd9bc4f1f337cf1ec7e1e337c70e',
+                    '31e1e3c7ce0e31f1e3e7cf1e31b13366091371993234199379991a341811599912341810598912378c18498913278f1e498913e7870f798913e6018379991a440181fd9912661191fd99326619938df1f266599b85f1e237cf1e85e1c227c60e',
+                    '31e1e3c7ce0e31f1e3e7cf1e31f1f366491379993276199379991236181159991a361810498912378c18498913678f1e498913e7870e799913e60183799b1b440181fd9912641191fdb9b26619938df1f267cd9b8df1e237cf1e85e1c227c70e',
+                    '00000000040830e3c3c7ce1c31f3e3e7df1e31f3f3e69b3671bb33661132799b12241830599b12271c30599b12679c3cc98b13678e1e499b13e7870e799b13c40183f99b124411a3f99b326611b2cdf3f6679f368cf3e627df1e85e1c227ce1c',
+                    '31e1e3c7cf0e31f1e3e7cf1e31b13266891379993236199379991236181159991a361810599912378c18498912278f1e498913e7870f699913e60183f9991a460191fd99126611b1fd99326619b38df17267dd9b85f1e237cf1f87e1c227c70e'],
+ 'pelvis_TOP': ['fffc1ff03ff8fffc3ff83ffe0f807c7c3e7e0780f83e3c0f0780f01f3c0f0781e00f3c0f0781e00f3c0f0781e0073c1f0781e0073ffe0781e00f3ffc0781e00f3c000780f01f3c000780f83e3c0007807e7c3c0007803ff83c0007800ff03c00',
+                'fffc1ff03ff8fffc3ff83ffe0f807c7c3e1e0780f83e3c0f0780f01f3c0f0781e00f3c0f0781e00f3c0f0781e0073c1e0781e0073ffe0781e00f3ff00781e00f3c000780f01f3c000780f83e3c0007807c7c3c0007803ff83c0007800ff03c00',
+                'fffc1ff03ff0fffc3ff83ffe6fd87c7c3e7e0780f83e3c0f0780f01f3c0f0781e00f3c0f0781e00f3c0f0781e0073e1f0781e0073ffe0781e00f3ffc0781e00f3c000780f01f3c000780f83e3c0007807e7c3c0007803ff83c0007800ff03c00',
+                '000001000000fffc1ff01ff0fffc3ff83ffe7ff87e7c3f3e0780f03e3c0f0781e00f3c0f0781e00f3c0f0781e00f3e1e0781e0073f3e0781e0073ffc0781e00f3ff80781e00f3e000780f03e3c000780fefc3c0007803ff83c0003800ff03800',
+                'fffc1ff03ff0fffc3ff83ffe07807c7c3c7e0780f81e3c0f0780f00f3c0f0781e00f3c0f0781e00f3c0f0781e0073c1e0781e00f3ffe0781e00f3ffc0781e00f3c000780f00f3c000780f81e3c0007807e7c3c0007803ff83c0007800ff03c00'],
+ 'pelvis_DAH': ['ffc00fe0780fffe00fe0780ff3f00fc0780ff0f80ee0780ff07c0ef0780ff03c1ef0780ff03c1e70780ff03c18787ffff03c38787ffff03c3ef8780ff03c3ff8780ff07c7ffc780ff0f8fffc780ffff0f01c780fffe0e00c780fff81e00e780f',
+                'ffc00780780effe00fc0780ff1f00fe0780ff0f80fe0780ff07c0ff0780ff03c1cf0780ff03c1870780ff03c18787ffff03c38787ffff03c3ef8780ff03c3ff8780ff0787ffc780ff0f8fffc780ffbf0f01c780fffe0e00c780fff80e00c780e',
+                'ffc00780780effe00fc0780ffbf00fe0780ff0f80fe0780ff07c0ff0780ff03c1cf0780ff03c1870780ff03c18787ffff03c38787ffff03c3ef8780ff03c3ff8780ff0787ffc780ff0f8fffc780ffbf0f01c780fffe0f00c780fff80e00c780e',
+                'ff800780380effe00fc0780ffbf00fe0780ff0f81fe0780ff07c1ff0780ff03c1cf0780ff03c18707c1ff01c18787ffff01c38787ffff03c3ef87c1ff03c3ff8780ff0787ff8780ff0f8fff8780ffff0f01c780fffe0e01c780f7f80e00c380e',
+                'ffc00fe0780fffe00fe0780ff1f00fe0780ff0f80ec0780ff07c0ee0780ff03c1ef0780ff03c1ef0780ff01c18787ffff03c38787ffff03c3978780ff03c3ff8780ff0787ffc780ff0f8fffc780ffff0f01c780fffe0e00c780fff81e00c780f']}
+
+
+def _sportsbox_color_mask(crop):
+    rgb = np.asarray(crop)
+    return (rgb.max(axis=2) > 140) & (np.ptp(rgb, axis=2) > 65)
+
+
+def _sportsbox_glyphs(mask):
+    edges = np.flatnonzero(np.diff(np.r_[False, mask.any(axis=0), False]))
+    for left, right in edges.reshape(-1, 2):
+        fragment = mask[:, left:right]
+        ys = np.flatnonzero(fragment.any(axis=1))
+        yield left, right, int(ys[0]), fragment[ys[0]:ys[-1] + 1]
+
+
+def _sportsbox_fingerprint(mask, size):
+    ys, xs = np.where(mask)
+    if not xs.size:
+        raise ValueError("文字を検出できませんでした。")
+    boxed = mask[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    sample = Image.fromarray(boxed.astype(np.uint8) * 255).resize(size, SPORTSBOX_RESAMPLE)
+    return np.asarray(sample).flatten() >= 128
+
+
+def _sportsbox_white_mask(crop):
+    return np.asarray(crop).min(axis=2) >= 165
+
+
+def _sportsbox_distance(sample, encoded):
+    bits = np.unpackbits(np.frombuffer(bytes.fromhex(encoded), dtype=np.uint8))
+    return np.mean(sample != bits)
+
+
+def _sportsbox_read_number(image, y, bounds, digit_templates):
+    left, right = bounds
+    cut_off = right > image.width
+    scan_left = left + 6
+    scan_right = min(right - 6, image.width)
+    groups = list(_sportsbox_glyphs(_sportsbox_color_mask(image.crop((scan_left, y, scan_right, y + 62)))))
+    if not groups:
+        return None
+    last_x = groups[-1][1] + scan_left
+    has_degree = 12 <= groups[-1][3].shape[0] <= 25 and groups[-1][2] < 20
+    if has_degree:
+        degree_start = groups[-1][0] + scan_left
+        groups.pop()
+    if not groups:
+        return None
+    first_x = groups[0][0] + scan_left
+    digit_end = groups[-1][1] + scan_left
+    if not has_degree and not cut_off:
+        return None
+    if cut_off:
+        # The reference crop can hide the degree symbol. Infer its expected
+        # position from the text alignment, while rejecting clipped digits.
+        if has_degree and not 4 <= degree_start - digit_end <= 13:
+            return None
+        if not has_degree and digit_end + 7 < image.width:
+            return None
+        if last_x == image.width and not has_degree:
+            return None
+        if abs((first_x + digit_end + 29) / 2 - (left + right) / 2) > 8:
+            return None
+
+    signed = groups[0][3].shape[0] <= 9
+    if signed:
+        dash = groups.pop(0)[3]
+        if not 12 <= dash.shape[1] <= 23 or dash.shape[0] < 4:
+            return None
+    if not 1 <= len(groups) <= 3:
+        return None
+    digits = []
+    for _, _, _, shape in groups:
+        h, w = shape.shape
+        if not 35 <= h <= 47 or not 13 <= w <= 36:
+            return None
+        sample = _sportsbox_fingerprint(shape, (16, 24))
+        scores = sorted((min(_sportsbox_distance(sample, ref) for ref in refs), digit) for digit, refs in digit_templates.items())
+        if scores[0][0] > .14 or scores[1][0] - scores[0][0] < .035:
+            return None
+        digits.append(scores[0][1])
+    value = int("".join(digits)) * (-1 if signed else 1)
+    return value if -180 <= value <= 180 else None
+
+
+def read_sportsbox_angles(data):
+    """Return detected values, leaving unconfirmed cells empty."""
+    with Image.open(io.BytesIO(data)) as source:
+        width, height = source.size
+        if height < 460 or width * height > 20_000_000 or abs(width / height - 2048 / 946) > .035:
+            raise ValueError("見本と同じ横長のTurn画面を、切り抜かずに読み込んでください。")
+        image = source.convert("RGB").resize(SPORTSBOX_REFERENCE_SIZE, SPORTSBOX_RESAMPLE)
+
+    templates = SPORTSBOX_GLYPH_TEMPLATES
+    values = {code: {} for code in SPORTSBOX_POSITIONS}
+    for metric, (y, cards, title_y) in SPORTSBOX_ROWS.items():
+        for (left, right), code, badge_box, badge in zip(cards, SPORTSBOX_POSITIONS, SPORTSBOX_BADGES[metric], ("Address", "TOP", "DAH")):
+            title_box = (left + 6, title_y, left + 145, title_y + 29)
+            try:
+                title = _sportsbox_fingerprint(_sportsbox_white_mask(image.crop(title_box)), (64, 16))
+                position = _sportsbox_fingerprint(_sportsbox_white_mask(image.crop(badge_box)), (48, 16))
+            except ValueError:
+                continue
+            if _sportsbox_distance(title, templates[metric]) > .15:
+                continue
+            if min(_sportsbox_distance(position, ref) for ref in templates[metric + "_" + badge]) > .14:
+                continue
+            value = _sportsbox_read_number(image, y, (left, right), templates["digits"])
+            if value is not None:
+                values[code][metric] = value
+    return values
+
+
 def sportsbox_settings(job: dict) -> None:
     token = job["token"]
     job["sportsbox_angles"] = {}
@@ -615,7 +795,7 @@ def sportsbox_settings(job: dict) -> None:
         with st.spinner("Sportsbox画像から回転角を読み取っています…"):
             error = None
             try:
-                values = read_angles(screenshot.getvalue())
+                values = read_sportsbox_angles(screenshot.getvalue())
             except ValueError as exc:
                 error, values = str(exc), {}
             except (OSError, Image.DecompressionBombError):
