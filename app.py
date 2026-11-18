@@ -265,7 +265,7 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
             frames = job["p_frames"]
             if frames["P1"] <= frame <= frames["P4"] and all(valid_point(body.get(k)) for k in RIGHT_LEG_POINTS):
                 ankle, thigh = RIGHT_LEG_POINTS
-                add_line(code, body[ankle], body[thigh])
+                add_line(code, body[ankle], body[thigh], angle=True)
     for shape in job["shapes"]:
         target = shape.get("target_p")
         if (target and job["p_frames"].get(target) == frame) or (not target and in_positions(frame,custom_positions or [],job["p_frames"])):
@@ -1225,7 +1225,7 @@ def render_app():
     if line == "hip_right_knee":
         st.caption("右ひざを検出したコマに、画面の水平線（0°）に対する角度を表示します。腰側とひざ側の丸をドラッグして調整できます。")
     if line == "right_leg_outer":
-        st.caption("P1〜P4の区間に表示します。外くるぶし側と太ももの付け根側を、丸をドラッグして調整できます。")
+        st.caption("P1〜P4の区間に、画面の水平線（0°）に対する角度を表示します。両端の丸をドラッグして調整できます。")
     with st.expander("点線・表示するPを変更"):
         style["dash"]=st.selectbox("種類",["solid","dashed"],index=["solid","dashed"].index(style["dash"]),format_func=lambda x:"実線" if x=="solid" else "点線",key=f"dash_{line}",on_change=clear_outputs)
         if line not in ("shoulders", "right_leg_outer"):
