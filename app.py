@@ -239,7 +239,7 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
             top, bottom = (g["top"], g["bottom"]) if g.get("head") else (.12, .90)
             add_line(code, [x, top], [x, bottom])
         elif code == "hip_right_knee" and body and valid_point(body.get("rk")):
-            add_line(code, body["hip"], body["rk"])
+            add_line(code, body["hip"], body["rk"], angle=True)
     for shape in job["shapes"]:
         target = shape.get("target_p")
         if (target and job["p_frames"].get(target) == frame) or (not target and in_positions(frame,custom_positions or [],job["p_frames"])):
@@ -972,6 +972,7 @@ WORKSPACE_SETTINGS = {
     "active_p", "active_line", "camera_mode", "enabled_lines", "styles",
     "show_p1_reference", "target_side", "custom_positions", "show_phase_list",
     "pause_positions", "pause_seconds", "snapshot_positions", "upload_method",
+    "back_vertical_dash_initialized",
 }
 
 
@@ -1077,7 +1078,13 @@ def render_app():
         current_lines = st.session_state["enabled_lines"]
         st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, *REAR_ONLY_LINES]))
     for key, color in COLORS.items():
-        styles.setdefault(key, {"color":color, "width":3, "dash":"dashed" if key=="hip" else "solid", "positions":[]})
+        styles.setdefault(key, {"color":color, "width":3, "dash":"dashed" if key in ("hip", "back_vertical") else "solid", "positions":[]})
+    if not st.session_state.get("back_vertical_dash_initialized"):
+        vertical_style = styles["back_vertical"]
+        if vertical_style["color"].upper() == COLORS["back_vertical"] and vertical_style["dash"] == "solid":
+            vertical_style["dash"] = "dashed"
+            st.session_state.pop("dash_back_vertical", None)
+        st.session_state["back_vertical_dash_initialized"] = True
     if styles["shoulders"]["color"].upper() == "#69F0AE":
         styles["shoulders"]["color"] = COLORS["shoulders"]
         st.session_state.pop("color_shoulders", None)
@@ -1178,7 +1185,7 @@ def render_app():
                 finally:
                     progress.empty()
         if line == "hip_right_knee":
-            st.caption("右ひざを検出したコマに表示します。腰側とひざ側の丸をドラッグして調整できます。")
+            st.caption("右ひざを検出したコマに、画面の水平線（0°）に対する角度を表示します。腰側とひざ側の丸をドラッグして調整できます。")
     with st.expander("点線・表示するPを変更"):
         style["dash"]=st.selectbox("種類",["solid","dashed"],index=["solid","dashed"].index(style["dash"]),format_func=lambda x:"実線" if x=="solid" else "点線",key=f"dash_{line}",on_change=clear_outputs)
         if line!="shoulders":
