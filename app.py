@@ -438,7 +438,7 @@ def editor_phase_change(job: dict,event,phase: str,frame: int) -> str | None:
 
 EDITOR_HTML = r"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
-*{box-sizing:border-box}body{margin:0;font-family:Arial,"Yu Gothic",Meiryo,sans-serif;color:#173831}#root{padding:0 1px 8px}.toolbar{margin-top:6px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;padding:8px;background:#edf2ec;border:1px solid #d8e0d5;border-radius:7px}button,select,input{font:inherit}button{min-height:36px;border:1px solid #b7c7b1;border-radius:5px;background:#fff;color:#173831;padding:6px 10px;cursor:pointer;font-size:12px}button.active{background:#1c4c40;color:white;border-color:#1c4c40}.toolbar label{font-size:11px;display:flex;align-items:center;gap:3px}.toolbar input[type=color]{width:29px;height:31px;padding:0;border:0;background:none}.toolbar select{height:31px;border:1px solid #b7c7b1;border-radius:4px;background:white;font-size:11px}.canvas-wrap{position:relative;display:inline-flex;max-width:100%}.phase-overlay{position:absolute;top:8px;left:8px;z-index:2;padding:3px;background:rgba(255,255,255,.9);border:1px solid #a9bbaa;border-radius:7px;box-shadow:0 1px 6px #0002}.phase-overlay select{font-size:16px;font-weight:bold;min-height:42px;min-width:84px;padding:6px 10px;background:transparent;border:0;border-radius:4px;color:#173831}.view{margin-top:0;background:#e9ede6;border:1px solid #cbd5c6;border-radius:7px;display:flex;justify-content:center;align-items:center;overflow:hidden}canvas{display:block;max-width:100%;max-height:620px;width:auto;height:auto;touch-action:none;cursor:grab}.hint{font-size:11px;line-height:1.8;color:#65755e;margin:7px 2px 0}#saved{font-size:11px;min-height:20px;margin:5px 2px 0;color:#36734a}button:focus-visible{outline:3px solid #c8dc8e}@media(max-width:600px){.toolbar{padding:6px;gap:4px}button{font-size:11px;min-height:38px;padding:5px 8px}canvas{max-height:560px}}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,"Yu Gothic",Meiryo,sans-serif;color:#173831}#root{padding:0 1px 8px}html,body{overscroll-behavior:none}canvas{-webkit-touch-callout:none;user-select:none}.toolbar{margin-top:6px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;padding:8px;background:#edf2ec;border:1px solid #d8e0d5;border-radius:7px}button,select,input{font:inherit}button{min-height:36px;border:1px solid #b7c7b1;border-radius:5px;background:#fff;color:#173831;padding:6px 10px;cursor:pointer;font-size:12px}button.active{background:#1c4c40;color:white;border-color:#1c4c40}.toolbar label{font-size:11px;display:flex;align-items:center;gap:3px}.toolbar input[type=color]{width:29px;height:31px;padding:0;border:0;background:none}.toolbar select{height:31px;border:1px solid #b7c7b1;border-radius:4px;background:white;font-size:11px}.canvas-wrap{position:relative;display:inline-flex;max-width:100%}.phase-overlay{position:absolute;top:8px;left:8px;z-index:2;padding:3px;background:rgba(255,255,255,.9);border:1px solid #a9bbaa;border-radius:7px;box-shadow:0 1px 6px #0002}.phase-overlay select{font-size:16px;font-weight:bold;min-height:42px;min-width:84px;padding:6px 10px;background:transparent;border:0;border-radius:4px;color:#173831}.view{margin-top:0;background:#e9ede6;border:1px solid #cbd5c6;border-radius:7px;display:flex;justify-content:center;align-items:center;overflow:hidden}canvas{display:block;max-width:100%;max-height:620px;width:auto;height:auto;touch-action:none;cursor:grab}.hint{font-size:11px;line-height:1.8;color:#65755e;margin:7px 2px 0}#saved{font-size:11px;min-height:20px;margin:5px 2px 0;color:#36734a}button:focus-visible{outline:3px solid #c8dc8e}@media(max-width:600px){.toolbar{padding:6px;gap:4px}button{font-size:11px;min-height:38px;padding:5px 8px}canvas{max-height:560px}}
 </style></head><body><div id="root"><div class="view"><div class="canvas-wrap"><canvas id="canvas" width="720" height="960" aria-label="管理線を直接ドラッグするプレビュー"></canvas><div class="phase-overlay"><select id="phaseSelect" aria-label="ポジション"><option value="P1">P1</option><option value="P2">P2</option><option value="P3">P3</option><option value="P4">P4</option><option value="P5">P5</option><option value="P6">P6</option><option value="P7">P7</option><option value="P8">P8</option><option value="P9">P9</option><option value="P10">P10</option></select></div></div></div><div class="toolbar"><button data-tool="move" class="active">✥ 線を動かす</button><button data-tool="line">╱ 直線</button><button data-tool="circle">○ 円</button><button data-tool="free">〰 手描き</button><input id="color" type="color" value="#ffff00" aria-label="手描きの色"><select id="width" aria-label="手描きの太さ"><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select><select id="dash" aria-label="手描きの線種"><option value="solid">実線</option><option value="dashed">点線</option></select><label><input id="angle" type="checkbox" checked>角度</label><label><input id="bind" type="checkbox" checked>このPのみ</label><button id="undo">↶ 戻す</button><button id="clear">描画を消去</button></div><p class="hint">丸をドラッグすると位置・角度を調整できます　シャフトとヒップは線そのものも動かせます<br>直線・円・手描きは映像上をドラッグして追加します　3点を順番に押す操作はありません</p><div id="saved" role="status">動画と管理線を準備しています…</div></div><script>
 const $=id=>document.getElementById(id),canvas=$('canvas'),ctx=canvas.getContext('2d');let args=null,scene=null,g=null,body=null,shapes=[],tool='move',drag=null,active=null,history=[],lastEvent=null,lastHeight=0;const img=new Image();const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v)),clone=x=>JSON.parse(JSON.stringify(x));let changedG=false,changedB=false,changedS=false;
 function message(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*');}
@@ -479,21 +479,35 @@ function drawSportsbox(label){
 }
 function render(){if(!args||!img.complete||!img.naturalWidth)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);args.primitives.forEach(s=>draw(geometry(s)));shapes.filter(visible).forEach(draw);if(active)draw(active);if(tool==='move'){for(const h of handles()){ctx.save();ctx.setLineDash([]);ctx.fillStyle=h.color||'#e5f28b';ctx.strokeStyle='#163c30';ctx.lineWidth=2;ctx.beginPath();ctx.arc(h.p[0]*canvas.width,h.p[1]*canvas.height,Math.max(8,canvas.height*.012),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();if(h.label)text(h.label,[h.p[0]+.018,h.p[1]-.015],h.color);}}drawSportsbox(args.sportsbox);height();}
 function remember(){history.push(clone({g,body,shapes}));if(history.length>25)history.shift();}
-function emit(){if(!changedG&&!changedB&&!changedS)return;$('phaseSelect').disabled=true;lastEvent=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);message('streamlit:setComponentValue',{dataType:'json',value:{scene,event_id:lastEvent,guides:changedG?g:null,body:changedB?body:null,shapes:changedS?shapes:null}});changedG=changedB=changedS=false;$('saved').textContent='✓ 変更を保存しました';}
+function emit(){if(!changedG&&!changedB&&!changedS)return;$('phaseSelect').disabled=true;lastEvent=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);message('streamlit:setComponentValue',{dataType:'json',value:{scene,event_id:lastEvent,guides:changedG?g:null,body:changedB?body:null,shapes:changedS?shapes:null}});changedG=changedB=changedS=false;$('saved').textContent='変更を反映中…';}
 function pos(e){const r=canvas.getBoundingClientRect();return[clamp((e.clientX-r.left)/r.width),clamp((e.clientY-r.top)/r.height)];}
 function hit(p){const rect=canvas.getBoundingClientRect();const distances=handles().map(h=>({h,d:Math.hypot((h.p[0]-p[0])*rect.width,(h.p[1]-p[1])*rect.height)})).filter(v=>v.d<25).sort((a,b)=>a.d-b.d);if(distances.length)return distances[0].h;
 const candidates=[];if(args.primitives.some(s=>s.id==='hip'))candidates.push({type:'hip',d:Math.abs(g.hip-p[0])*rect.width});if(args.primitives.some(s=>s.id==='shaft')){const[a,b]=g.shaft,dx=(b[0]-a[0])*2.2*rect.width,dy=(b[1]-a[1])*2.2*rect.height,x=(p[0]-a[0])*rect.width,y=(p[1]-a[1])*rect.height,t=clamp((x*dx+y*dy)/(dx*dx+dy*dy||1));candidates.push({type:'shaftMove',d:Math.hypot(x-dx*t,y-dy*t)});}return candidates.filter(v=>v.d<13).sort((a,b)=>a.d-b.d)[0]||null;}
 function translate(pts,delta){const dx=clamp(delta[0],-Math.min(...pts.map(p=>p[0])),1-Math.max(...pts.map(p=>p[0]))),dy=clamp(delta[1],-Math.min(...pts.map(p=>p[1])),1-Math.max(...pts.map(p=>p[1])));return pts.map(p=>[p[0]+dx,p[1]+dy]);}
-canvas.addEventListener('pointerdown',e=>{if(!args||args.disabled)return;const p=pos(e);canvas.setPointerCapture(e.pointerId);if(tool==='move'){drag=hit(p);if(drag){remember();drag.last=p;$('saved').textContent='調整中…';}}else{remember();const base={color:$('color').value,width:Number($('width').value),dash:$('dash').value,target_p:$('bind').checked?args.phase:null};if(tool==='line')active={type:'line',a:p,b:[...p],angle:$('angle').checked,...base};if(tool==='circle')active={type:'circle',center:p,radius:.001,...base};if(tool==='free')active={type:'free',points:[p],...base};}e.preventDefault();});
-canvas.addEventListener('pointermove',e=>{if(!drag&&!active)return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'){g.vertical=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='head'){g.head=p;changedG=true;}else if(d.type==='radius'){g.radius=clamp(Math.hypot((p[0]-g.head[0])*canvas.width,(p[1]-g.head[1])*canvas.height)/canvas.width,.01,.25);changedG=true;}else if(d.type==='body'){if(d.key==='sh'){const delta=[p[0]-body.sh[0],p[1]-body.sh[1]];body.ls=[clamp(body.ls[0]+delta[0]),clamp(body.ls[1]+delta[1])];body.rs=[clamp(body.rs[0]+delta[0]),clamp(body.rs[1]+delta[1])];}body[d.key]=p;if(['ls','rs'].includes(d.key))body.sh=[(body.ls[0]+body.rs[0])/2,(body.ls[1]+body.rs[1])/2];changedB=true;}else if(d.type==='custom'){const s=shapes[d.key];if(d.end==='radius')s.radius=clamp(Math.hypot((p[0]-s.center[0])*canvas.width,(p[1]-s.center[1])*canvas.height)/canvas.width,.003,2);else if(d.end==='free'){s.points=translate(s.points,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;}else s[d.end]=p;changedS=true;}}
+let activePointer=null;
+canvas.addEventListener('pointerdown',e=>{if(!args||args.disabled||activePointer!==null||!e.isPrimary||e.button!==0)return;activePointer=e.pointerId;const p=pos(e);canvas.setPointerCapture(e.pointerId);if(tool==='move'){drag=hit(p);if(drag){remember();drag.last=p;$('saved').textContent='調整中…';}}else{remember();const base={color:$('color').value,width:Number($('width').value),dash:$('dash').value,target_p:$('bind').checked?args.phase:null};if(tool==='line')active={type:'line',a:p,b:[...p],angle:$('angle').checked,...base};if(tool==='circle')active={type:'circle',center:p,radius:.001,...base};if(tool==='free')active={type:'free',points:[p],...base};}e.preventDefault();});
+canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'){g.vertical=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='head'){g.head=p;changedG=true;}else if(d.type==='radius'){g.radius=clamp(Math.hypot((p[0]-g.head[0])*canvas.width,(p[1]-g.head[1])*canvas.height)/canvas.width,.01,.25);changedG=true;}else if(d.type==='body'){if(d.key==='sh'){const delta=[p[0]-body.sh[0],p[1]-body.sh[1]];body.ls=[clamp(body.ls[0]+delta[0]),clamp(body.ls[1]+delta[1])];body.rs=[clamp(body.rs[0]+delta[0]),clamp(body.rs[1]+delta[1])];}body[d.key]=p;if(['ls','rs'].includes(d.key))body.sh=[(body.ls[0]+body.rs[0])/2,(body.ls[1]+body.rs[1])/2];changedB=true;}else if(d.type==='custom'){const s=shapes[d.key];if(d.end==='radius')s.radius=clamp(Math.hypot((p[0]-s.center[0])*canvas.width,(p[1]-s.center[1])*canvas.height)/canvas.width,.003,2);else if(d.end==='free'){s.points=translate(s.points,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;}else s[d.end]=p;changedS=true;}}
 if(active){if(active.type==='line')active.b=p;if(active.type==='circle')active.radius=Math.max(.001,Math.hypot((p[0]-active.center[0])*canvas.width,(p[1]-active.center[1])*canvas.height)/canvas.width);if(active.type==='free'&&active.points.length<5000)active.points.push(p);}render();e.preventDefault();});
-canvas.addEventListener('pointerup',()=>{if(active){const valid=active.type==='free'?active.points.length>=2:active.type==='circle'?active.radius>.003:Math.hypot(active.a[0]-active.b[0],active.a[1]-active.b[1])>.005;if(valid){shapes.push(active);changedS=true;}active=null;}drag=null;render();emit();});
-canvas.addEventListener('pointercancel',()=>{active=null;drag=null;render();emit();});
+function finishGesture(e){if(e.pointerId!==activePointer)return;activePointer=null;if(active){const valid=active.type==='free'?active.points.length>=2:active.type==='circle'?active.radius>.003:Math.hypot(active.a[0]-active.b[0],active.a[1]-active.b[1])>.005;if(valid){shapes.push(active);changedS=true;}active=null;}drag=null;render();emit();}
+for(const name of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(name,finishGesture);
 document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{tool=b.dataset.tool;document.querySelectorAll('[data-tool]').forEach(x=>x.classList.toggle('active',x===b));canvas.style.cursor=tool==='move'?'grab':'crosshair';render();});
 $('undo').onclick=()=>{if(!history.length)return;const prev=history.pop();g=prev.g;body=prev.body;shapes=prev.shapes;changedG=changedS=true;changedB=!!body;render();emit();};
 $('clear').onclick=()=>{remember();shapes=shapes.filter(s=>!visible(s));changedS=true;render();emit();};
 $('phaseSelect').onchange=()=>{if(!args)return;lastEvent=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);$('phaseSelect').disabled=true;message('streamlit:setComponentValue',{dataType:'json',value:{scene,event_id:lastEvent,action:'select_phase',phase:$('phaseSelect').value}});};
-img.onload=()=>{render();height();};window.addEventListener('message',e=>{if(e.source!==window.parent||e.data.type!=='streamlit:render')return;args=e.data.args;$('phaseSelect').value=args.phase;$('phaseSelect').disabled=!!(lastEvent&&args.ack!==lastEvent);const newScene=args.scene!==scene;scene=args.scene;g=clone(args.guides);body=clone(args.body);shapes=clone(args.shapes);if(newScene){history=[];tool='move';document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool==='move'));}canvas.width=args.width;canvas.height=args.height;const src='data:image/jpeg;base64,'+args.image;if(img.src!==src)img.src=src;else render();$('saved').textContent=lastEvent&&args.ack===lastEvent?'✓ 変更を保存しました':'丸・線を直接ドラッグして調整してください';height();});
+let scrolledView=null;
+function returnToEditor(id){
+    if(!id||scrolledView===id)return;
+    scrolledView=id;
+    requestAnimationFrame(()=>{
+        if(!window.frameElement)return;
+        try{
+            if(sessionStorage.getItem('golf-restored-view')===id)return;
+            sessionStorage.setItem('golf-restored-view',id);
+        }catch{}
+        window.frameElement.scrollIntoView({block:'start'});
+    });
+}
+img.onload=()=>{render();height();};window.addEventListener('message',e=>{if(e.source!==window.parent||e.data.type!=='streamlit:render')return;args=e.data.args;$('phaseSelect').value=args.phase;$('phaseSelect').disabled=!!(lastEvent&&args.ack!==lastEvent);returnToEditor(args.restore_view);const newScene=args.scene!==scene;scene=args.scene;g=clone(args.guides);body=clone(args.body);shapes=clone(args.shapes);if(newScene){history=[];tool='move';document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool==='move'));}canvas.width=args.width;canvas.height=args.height;const src='data:image/jpeg;base64,'+args.image;if(img.src!==src)img.src=src;else render();$('saved').textContent=lastEvent&&args.ack===lastEvent?'✓ 変更を保存しました':'丸・線を直接ドラッグして調整してください';height();});
 new ResizeObserver(height).observe($('root'));window.addEventListener('resize',height);message('streamlit:componentReady',{apiVersion:1});height();
 </script></body></html>
 """
@@ -584,8 +598,6 @@ def mobile_upload(kind: str, state: dict, key: str) -> MobileUpload | None:
         name=state.get("name", ""), key=key, default=None,
     )
     if accept_mobile_upload(state, event, limit):
-        if image and event["kind"] == "begin":
-            clear_outputs()
         st.rerun()
     if state.get("error"):
         st.error(state["error"])
@@ -812,6 +824,13 @@ def _read_sportsbox_layout(image):
     return values
 
 
+def clear_sportsbox_image() -> None:
+    job = st.session_state.get("job")
+    if job:
+        job.pop("sportsbox_import", None)
+    clear_outputs()
+
+
 def sportsbox_settings(job: dict) -> None:
     token = job["token"]
     job["sportsbox_angles"] = {}
@@ -832,24 +851,26 @@ def sportsbox_settings(job: dict) -> None:
         screenshot = st.file_uploader(
             "同じスイングのSportsbox画像を選択",
             type=["png", "jpg", "jpeg", "webp"],
-            key=f"sportsbox_file_{token}", on_change=clear_outputs,
+            key=f"sportsbox_file_{token}", on_change=clear_sportsbox_image,
             help="見本と同じ横長のTurn画面を使用してください。DAHの次のカードをIMPACTとして読み取ります。",
         )
     else:
         screenshot = None
 
+    state = job.get("sportsbox_import")
     if method == "手入力":
         source_id = "manual"
-    elif screenshot is None:
-        if method == "通常":
-            job.pop("sportsbox_import", None)
-        return
-    else:
+    elif screenshot is not None:
         source_id = screenshot.file_id
         st.caption(f"画像を受信しました　{screenshot.name}")
+    elif state and state.get("method") == method:
+        source_id = state["id"]
+        st.caption(f"保存された読み取り結果　{state.get('name', '')}")
+    else:
+        return
 
-    state = job.get("sportsbox_import")
     if state is None or state["id"] != source_id:
+        clear_outputs()
         error = None
         values = {}
         if screenshot is not None:
@@ -860,12 +881,15 @@ def sportsbox_settings(job: dict) -> None:
                     error = str(exc)
                 except (OSError, Image.DecompressionBombError):
                     error = "画像を開けませんでした。端末のスクリーンショットをPNGまたはJPEGで選び直してください。"
-        state = {"id": source_id, "values": values, "error": error, "read_count": sum(map(len, values.values()))}
+        state = {
+            "id": source_id, "method": method, "name": screenshot.name if screenshot is not None else "",
+            "values": values, "error": error, "read_count": sum(map(len, values.values())),
+        }
         job["sportsbox_import"] = state
 
     if state["error"]:
         st.warning(state["error"])
-    elif screenshot is not None:
+    elif method != "手入力":
         count = state["read_count"]
         if count:
             st.caption(f"画像から読み取った値　{count} / 6")
@@ -889,8 +913,125 @@ def sportsbox_settings(job: dict) -> None:
         st.info("読み取れなかった値は空欄です。画像を見ながら入力できます。")
 
 
+WORKSPACE_HTML = """<!doctype html><html lang="ja"><meta charset="utf-8"><script>
+const post=(type, extra={})=>window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*');
+let reported=false;
+window.addEventListener('message',event=>{
+    if(reported||event.source!==window.parent||event.data.type!=='streamlit:render')return;
+    reported=true;
+    let id=null;
+    try{
+        const key='golf-swing-edit-workspace';
+        id=sessionStorage.getItem(key);
+        if(!/^[0-9a-f]{32}$/.test(id||'')){
+            id=Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
+            sessionStorage.setItem(key,id);
+        }
+    }catch{id=null;}
+    post('streamlit:setComponentValue',{dataType:'json',value:{id}});
+});
+post('streamlit:componentReady',{apiVersion:1});
+post('streamlit:setFrameHeight',{height:0});
+</script></html>"""
+
+WORKSPACE_SETTINGS = {
+    "active_p", "active_line", "camera_mode", "enabled_lines", "styles",
+    "show_p1_reference", "target_side", "custom_positions", "show_phase_list",
+    "pause_positions", "pause_seconds", "snapshot_positions", "upload_method",
+}
+
+
+def workspace_file(workspace_id: str) -> Path:
+    return Path(tempfile.gettempdir()) / "golf_swing_workspace" / f"{workspace_id}.json"
+
+
+def restore_workspace() -> None:
+    folder = Path(tempfile.gettempdir()) / ("golf_workspace_ui_" + hashlib.sha256(WORKSPACE_HTML.encode()).hexdigest()[:16])
+    folder.mkdir(exist_ok=True)
+    index = folder / "index.html"
+    if not index.exists():
+        index.write_text(WORKSPACE_HTML, encoding="utf-8")
+    component = declare_component("golf_workspace", path=str(folder))
+    event = component(key="workspace_browser", default=None)
+    state = st.session_state
+    if "workspace_id" in state or not isinstance(event, dict):
+        return
+    workspace_id = event.get("id")
+    if not isinstance(workspace_id, str) or not re.fullmatch(r"[0-9a-f]{32}", workspace_id):
+        state["workspace_id"] = None
+        return
+    state["workspace_id"] = workspace_id
+    if state.get("job"):
+        return
+    try:
+        record = json.loads(workspace_file(workspace_id).read_text(encoding="utf-8"))
+        job = record["job"]
+        settings = record["settings"]
+        if not isinstance(settings, dict):
+            raise ValueError("Invalid workspace settings")
+        if not Path(job["path"]).is_file():
+            state["workspace_unavailable"] = True
+            return
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, KeyError, TypeError):
+        state["workspace_unavailable"] = True
+        return
+    job["output_images"] = None
+    if job.get("output_video") and not Path(job["output_video"]).is_file():
+        job["output_video"] = None
+    state["job"] = job
+    for key, value in settings.items():
+        state[key] = value
+    state["restore_view"] = uuid.uuid4().hex
+
+
+def save_workspace() -> None:
+    state = st.session_state
+    workspace_id, job = state.get("workspace_id"), state.get("job")
+    if not workspace_id or not job:
+        return
+    token = job["token"]
+    keys = WORKSPACE_SETTINGS | {f"sportsbox_enabled_{token}", f"sportsbox_method_{token}"}
+    settings = {key: state[key] for key in keys if key in state}
+    saved_job = {key: value for key, value in job.items() if key not in {"sportsbox_upload", "output_images"}}
+    payload = json.dumps({"job": saved_job, "settings": settings}, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    if digest == state.get("workspace_digest"):
+        return
+    path = workspace_file(workspace_id)
+    temporary = None
+    try:
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+        temporary.replace(path)
+        state["workspace_digest"] = digest
+        state.pop("workspace_save_failed", None)
+    except OSError:
+        state["workspace_save_failed"] = True
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def main():
     st.set_page_config(page_title="ゴルフスイング分析・簡単操作版",page_icon="🏌️",layout="wide",initial_sidebar_state="expanded")
+    st.markdown("""<style>
+    html, body, [data-testid="stMain"] {overscroll-behavior: none;}
+    </style>""", unsafe_allow_html=True)
+    restore_workspace()
+    try:
+        render_app()
+    finally:
+        save_workspace()
+
+
+def render_app():
     st.title("🏌️ ゴルフスイング分析")
     st.caption("Python / Streamlit版・簡単操作版　｜　動画選択 → 自動解析 → コマ・線を調整 → 保存")
     st.caption("撮影アングル・線の表示設定は左側の「管理線の設定」にあります。見えない場合は画面左上の「＞」または「≫」で開いてください。")
@@ -908,7 +1049,7 @@ def main():
             st.checkbox("P1の胸・腰の基準線（白点線・太さ2）",value=True,key="show_p1_reference",on_change=clear_outputs)
         if "tilt" in enabled:
             st.selectbox("目標方向（画面上）",["左","右"],key="target_side",on_change=clear_outputs,help="胸が腰より目標側なら正、反対側ならマイナスです。")
-        custom_positions=st.multiselect("共通の手描き図形を表示するP",P_CODES,default=[],help="未選択なら全フレームに表示します。",on_change=clear_outputs)
+        custom_positions=st.multiselect("共通の手描き図形を表示するP",P_CODES,default=[],key="custom_positions",help="未選択なら全フレームに表示します。",on_change=clear_outputs)
         with st.expander("読み込みの詳細設定"):
             do_ai=st.checkbox("AI骨格解析を行う",value=True)
             max_side=st.selectbox("解析用動画の長辺",[720,960],index=1,format_func=lambda x:f"{x}px")
@@ -941,6 +1082,7 @@ def main():
             previous=st.session_state.get("job")
             st.session_state["job"]=build_job(path,info,poses,folder,uploaded.name)
             st.session_state["active_p"]="P1"
+            st.session_state.pop("restore_view", None)
             if previous:shutil.rmtree(previous["folder"],ignore_errors=True)
             progress.empty()
             st.success(f"読み込み完了　{sum(p is not None for p in poses)}/{len(poses)}コマで骨格を検出")
@@ -948,6 +1090,8 @@ def main():
             progress.empty();shutil.rmtree(folder,ignore_errors=True);st.error(str(exc))
     job=st.session_state.get("job")
     if not job:
+        if st.session_state.get("workspace_unavailable"):
+            st.info("前回の編集データを復元できませんでした。動画を選び直してください。")
         st.info("動画を選んで「動画を読み込んで解析」を押してください。")
         return
     sportsbox_settings(job)
@@ -955,11 +1099,15 @@ def main():
     job["target_dir"]=-1 if st.session_state.get("target_side","左")=="左" else 1
     info=job["info"]
     st.divider();st.subheader("2. コマと線を調整する")
+    if st.session_state.get("restore_view"):
+        st.caption("前回の編集内容を復元しました。")
+    if st.session_state.get("workspace_save_failed"):
+        st.warning("編集内容を一時保存できませんでした。ページを閉じずに作業してください。")
     code=st.session_state.get("active_p","P1")
     if code not in P_CODES:code="P1"
     c2,color_col,width_col=st.columns([2.4,1,1.2])
     enabled=st.session_state["enabled_lines"]
-    line=c2.selectbox("調整する線",enabled or ["shaft"],format_func=lambda k:LINE_NAMES[k],index=enabled.index("shaft") if "shaft" in enabled else 0)
+    line=c2.selectbox("調整する線",enabled or ["shaft"],format_func=lambda k:LINE_NAMES[k],index=enabled.index("shaft") if "shaft" in enabled else 0,key="active_line")
     style=st.session_state["styles"][line]
     style["color"]=color_col.color_picker("線の色",style["color"],key=f"color_{line}",on_change=clear_outputs)
     style["width"]=width_col.selectbox("線の太さ",[1,2,3,4,5,6,8],index=[1,2,3,4,5,6,8].index(style["width"]),format_func=lambda v:f"{v}px",key=f"width_{line}",on_change=clear_outputs)
@@ -990,7 +1138,7 @@ def main():
         ok,jpg=cv2.imencode(".jpg",current,[cv2.IMWRITE_JPEG_QUALITY,88])
         body=get_pose(job,frame_index,code)
         component=editor_component()
-        event=component(image=base64.b64encode(jpg).decode(),width=info["width"],height=info["height"],scene=f"{job['token']}:{code}:{frame_index}",phase=code,frame=frame_index,guides=job["guides"],body=body,primitives=primitives_for({**job,"shapes":[]},frame_index,cfg,code,custom_positions),shapes=job["shapes"],active_line=line,custom_visible=in_positions(frame_index,custom_positions,job["p_frames"]),sportsbox=sportsbox_overlay(job,code),ack=job["last_event"],key=f"editor_{job['token']}",default=None)
+        event=component(image=base64.b64encode(jpg).decode(),width=info["width"],height=info["height"],scene=f"{job['token']}:{code}:{frame_index}",phase=code,frame=frame_index,guides=job["guides"],body=body,primitives=primitives_for({**job,"shapes":[]},frame_index,cfg,code,custom_positions),shapes=job["shapes"],active_line=line,custom_visible=in_positions(frame_index,custom_positions,job["p_frames"]),sportsbox=sportsbox_overlay(job,code),restore_view=st.session_state.get("restore_view"),ack=job["last_event"],key=f"editor_{job['token']}",default=None)
         next_phase=editor_phase_change(job,event,code,frame_index)
         if next_phase:
             st.session_state["active_p"]=next_phase
@@ -999,7 +1147,7 @@ def main():
     st.caption(f"{code}　｜　{frame_index}コマ / {frame_index/info['fps']:.2f}秒　｜　コマ調整・線の移動は自動反映")
     if not body:st.caption("このコマでは骨格を検出できませんでした。別のコマに調整するか、手描き直線を使ってください。")
     st.caption("AIのポジションは候補です。特にインパクトは映像を見て微調整してください。線は3点指定ではなく、丸や線を直接ドラッグします。")
-    if st.checkbox("P1〜P10を一覧表示"):
+    if st.checkbox("P1〜P10を一覧表示",key="show_phase_list"):
         for start in range(0,10,5):
             cols=st.columns(5)
             for col,p in zip(cols,P_CODES[start:start+5]):
@@ -1008,7 +1156,7 @@ def main():
     st.divider();st.subheader("3. 作成して保存する")
     a,b=st.columns(2)
     pauses=a.multiselect("動画で止めるP",P_CODES,default=["P1","P4","P7"],key="pause_positions",on_change=clear_outputs)
-    snapshots=b.multiselect("静止画にするP",P_CODES,default=["P1","P4","P7"],on_change=clear_outputs)
+    snapshots=b.multiselect("静止画にするP",P_CODES,default=["P1","P4","P7"],key="snapshot_positions",on_change=clear_outputs)
     seconds=st.slider("動画での停止時間（秒）",.5,5.,2.,.5,key="pause_seconds",on_change=clear_outputs)
     st.caption("線を表示するPとは別に、上の「動画で止めるP」で停止対象を選びます。変更後は分析動画を作り直してください。")
     if pauses:
