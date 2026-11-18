@@ -25,6 +25,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import streamlit as st
 from streamlit.components.v1 import declare_component
+from sportsbox import METRICS as SPORTSBOX_METRICS, POSITIONS as SPORTSBOX_POSITIONS, read_angles
 
 P_CODES = [f"P{i}" for i in range(1, 11)]
 P_NAMES = dict(zip(P_CODES, ["アドレス", "テイクバック", "ハーフウェイバック", "トップ", "切り返し", "デリバリー", "インパクト", "フォロー", "ハイフォロー", "フィニッシュ"]))
@@ -241,7 +242,15 @@ def pil_font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None) -> np.ndarray:
+def sportsbox_overlay(job: dict, phase: str) -> str | None:
+    values = job.get("sportsbox_angles", {}).get(phase, {})
+    if any(values.get(metric) is None for metric in SPORTSBOX_METRICS):
+        return None
+    angles = "   ".join(f"{name} {values[metric]}°" for metric, name in SPORTSBOX_METRICS.items())
+    return f"回転角度   {angles}"
+
+
+def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None, sportsbox: str | None = None) -> np.ndarray:
     im = Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(im)
     w,h = im.size
@@ -287,6 +296,25 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None) 
             for a,b in zip(pts,pts[1:]): styled_line(a,b,color,width,dashed)
     if label:
         draw.text((15,12),label,font=pil_font(max(22,round(36*h/1080))),fill="#FFE26B",stroke_width=2,stroke_fill="black")
+    if sportsbox:
+        size = max(8, min(max(15, round(h * .028)), w // 17))
+        font = pil_font(size)
+        stroke = max(1, round(size * .1))
+        margin = max(6, round(size * .65))
+        pad = max(4, round(size * .35))
+        left, top, right, bottom = draw.textbbox(
+            (0, 0), sportsbox, font=font, anchor="rt", stroke_width=stroke,
+        )
+        x = w - margin - pad - right
+        y = margin + pad - top
+        ImageDraw.Draw(im, "RGBA").rectangle(
+            (x + left - pad, margin, w - margin, y + bottom + pad),
+            fill=(0, 0, 0, 166),
+        )
+        draw.text(
+            (x, y), sportsbox, font=font, fill="white",
+            anchor="rt", stroke_width=stroke, stroke_fill="black",
+        )
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
 
@@ -321,7 +349,7 @@ def export_video(job: dict, cfg: dict, pauses: list, pause_seconds: float, custo
             image=draw_annotations(frame,primitives_for(job,i,cfg,None,custom_positions))
             writer.write(image)
             for code in plan.get(i,[]):
-                paused=draw_annotations(frame,primitives_for(job,i,cfg,code,custom_positions),code)
+                paused=draw_annotations(frame,primitives_for(job,i,cfg,code,custom_positions),code,sportsbox_overlay(job,code))
                 for _ in range(hold_frames):writer.write(paused)
             if progress and i%10==0:progress((i+1)/info["frames"],f"動画を書き出し中 {i+1}/{info['frames']}")
         completed=True
@@ -345,7 +373,7 @@ def export_images(job: dict,cfg: dict,codes: list,custom_positions: list) -> dic
     with zipfile.ZipFile(zip_data,"w",zipfile.ZIP_DEFLATED) as zf:
         for code in codes:
             i=job["p_frames"][code]
-            annotated=draw_annotations(read_frame(job["path"],i),primitives_for(job,i,cfg,code,custom_positions),code)
+            annotated=draw_annotations(read_frame(job["path"],i),primitives_for(job,i,cfg,code,custom_positions),code,sportsbox_overlay(job,code))
             ok,png=cv2.imencode(".png",annotated)
             if not ok:raise RuntimeError("静止画を作成できませんでした。")
             data=png.tobytes();images.append((code,data,annotated));zf.writestr(code+".png",data)
@@ -425,7 +453,32 @@ function handles(){const out=[],shown=id=>args.primitives.some(s=>s.id===id);con
 if(args.active_line==='head'&&shown('head_reference')&&g.head){add(g.head,'head');add([g.head[0]+g.radius,g.head[1]],'radius');}if(args.active_line==='vertical'&&shown('vertical'))add([g.vertical,(g.top+g.bottom)/2],'vertical');if(args.active_line==='ankles'&&shown('ankles'))g.ankles.forEach((x,i)=>add([x,(g.top+g.bottom)/2],'ankles',i));
 if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)){add(body.sh,'body','sh');add(body.hip,'body','hip');}if(args.active_line==='shoulders'&&shown('shoulders')){add(body.ls,'body','ls');add(body.rs,'body','rs');}}
 shapes.forEach((s,i)=>{if(!visible(s))return;if(s.type==='line'){add(s.a,'custom',i,{end:'a'});add(s.b,'custom',i,{end:'b'});}if(s.type==='circle'){add(s.center,'custom',i,{end:'center'});add([s.center[0]+s.radius,s.center[1]],'custom',i,{end:'radius'});}if(s.type==='free'&&s.points.length)add(s.points[0],'custom',i,{end:'free'});});return out;}
-function render(){if(!args||!img.complete||!img.naturalWidth)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);args.primitives.forEach(s=>draw(geometry(s)));shapes.filter(visible).forEach(draw);if(active)draw(active);if(tool==='move'){for(const h of handles()){ctx.save();ctx.setLineDash([]);ctx.fillStyle=h.color||'#e5f28b';ctx.strokeStyle='#163c30';ctx.lineWidth=2;ctx.beginPath();ctx.arc(h.p[0]*canvas.width,h.p[1]*canvas.height,Math.max(8,canvas.height*.012),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();if(h.label)text(h.label,[h.p[0]+.018,h.p[1]-.015],h.color);}}height();}
+function drawSportsbox(label){
+    if(!label)return;
+    const size=Math.max(8,Math.min(Math.max(15,Math.round(canvas.height*.028)),Math.floor(canvas.width/17)));
+    const margin=Math.max(6,Math.round(size*.65));
+    const pad=Math.max(4,Math.round(size*.35)),stroke=Math.max(1,Math.round(size*.1));
+    ctx.save();
+    ctx.font=`bold ${size}px "Yu Gothic", Meiryo, sans-serif`;
+    ctx.textAlign='right';
+    ctx.textBaseline='alphabetic';
+    const metrics=ctx.measureText(label);
+    const x=canvas.width-margin-pad-stroke-metrics.actualBoundingBoxRight;
+    const y=margin+pad+stroke+metrics.actualBoundingBoxAscent;
+    const left=x-metrics.actualBoundingBoxLeft-stroke-pad;
+    const bottom=y+metrics.actualBoundingBoxDescent+stroke+pad;
+    ctx.fillStyle='rgba(0,0,0,.65)';
+    ctx.fillRect(left,margin,canvas.width-margin-left,bottom-margin);
+    ctx.setLineDash([]);
+    ctx.lineJoin='round';
+    ctx.lineWidth=2*stroke;
+    ctx.strokeStyle='#000';
+    ctx.fillStyle='#fff';
+    ctx.strokeText(label,x,y);
+    ctx.fillText(label,x,y);
+    ctx.restore();
+}
+function render(){if(!args||!img.complete||!img.naturalWidth)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);args.primitives.forEach(s=>draw(geometry(s)));shapes.filter(visible).forEach(draw);if(active)draw(active);if(tool==='move'){for(const h of handles()){ctx.save();ctx.setLineDash([]);ctx.fillStyle=h.color||'#e5f28b';ctx.strokeStyle='#163c30';ctx.lineWidth=2;ctx.beginPath();ctx.arc(h.p[0]*canvas.width,h.p[1]*canvas.height,Math.max(8,canvas.height*.012),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();if(h.label)text(h.label,[h.p[0]+.018,h.p[1]-.015],h.color);}}drawSportsbox(args.sportsbox);height();}
 function remember(){history.push(clone({g,body,shapes}));if(history.length>25)history.shift();}
 function emit(){if(!changedG&&!changedB&&!changedS)return;$('phaseSelect').disabled=true;lastEvent=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);message('streamlit:setComponentValue',{dataType:'json',value:{scene,event_id:lastEvent,guides:changedG?g:null,body:changedB?body:null,shapes:changedS?shapes:null}});changedG=changedB=changedS=false;$('saved').textContent='✓ 変更を保存しました';}
 function pos(e){const r=canvas.getBoundingClientRect();return[clamp((e.clientX-r.left)/r.width),clamp((e.clientY-r.top)/r.height)];}
@@ -540,6 +593,56 @@ def step_frame(code,widget,delta):
     job=st.session_state["job"];st.session_state[widget]=max(0,min(job["info"]["frames"]-1,int(st.session_state[widget])+delta));frame_change(code,widget)
 
 
+def sportsbox_settings(job: dict) -> None:
+    token = job["token"]
+    job["sportsbox_angles"] = {}
+    if not st.checkbox("Sportsboxの回転角を表示する（オプション）", key=f"sportsbox_enabled_{token}", on_change=clear_outputs):
+        return
+
+    screenshot = st.file_uploader(
+        "同じスイングのSportsbox画像を選択",
+        type=["png", "jpg", "jpeg"],
+        key=f"sportsbox_file_{token}",
+        on_change=clear_outputs,
+        help="見本と同じ横長のTurn画面を使用してください。DAHの次のカードをIMPACTとして読み取ります。",
+    )
+    if screenshot is None:
+        job.pop("sportsbox_import", None)
+        return
+
+    state = job.get("sportsbox_import")
+    if state is None or state["id"] != screenshot.file_id:
+        with st.spinner("Sportsbox画像から回転角を読み取っています…"):
+            error = None
+            try:
+                values = read_angles(screenshot.getvalue())
+            except ValueError as exc:
+                error, values = str(exc), {}
+            except (OSError, Image.DecompressionBombError):
+                error, values = "画像を開けませんでした。PNGまたはJPEGを選び直してください。", {}
+            state = {"id": screenshot.file_id, "values": values, "error": error}
+            job["sportsbox_import"] = state
+
+    if state["error"]:
+        st.warning(state["error"])
+    st.caption("画像と数値を照合し、必要に応じて修正してください。両方の角度がそろったポジションに表示します。")
+    values = {}
+    for col, (code, position) in zip(st.columns(3), SPORTSBOX_POSITIONS.items()):
+        col.markdown(f"**{code} · {position}**")
+        values[code] = {}
+        for metric, name in SPORTSBOX_METRICS.items():
+            values[code][metric] = col.number_input(
+                f"{name}の回転角（°）", min_value=-180, max_value=180,
+                value=state["values"].get(code, {}).get(metric), step=1, format="%d",
+                placeholder="未読取",
+                key=f"sportsbox_{token}_{screenshot.file_id}_{code}_{metric}", on_change=clear_outputs,
+            )
+    state["values"] = values
+    job["sportsbox_angles"] = values
+    if any(value is None for pair in values.values() for value in pair.values()):
+        st.info("読み取れなかった値は空欄です。画像を見ながら入力できます。")
+
+
 def main():
     st.set_page_config(page_title="ゴルフスイング分析・簡単操作版",page_icon="🏌️",layout="wide",initial_sidebar_state="expanded")
     st.title("🏌️ ゴルフスイング分析")
@@ -601,6 +704,7 @@ def main():
     if not job:
         st.info("動画を選んで「動画を読み込んで解析」を押してください。")
         return
+    sportsbox_settings(job)
     job["show_p1_spine"]=st.session_state["camera_mode"]=="back" and st.session_state.get("show_p1_reference",True)
     job["target_dir"]=-1 if st.session_state.get("target_side","左")=="左" else 1
     info=job["info"]
@@ -640,7 +744,7 @@ def main():
         ok,jpg=cv2.imencode(".jpg",current,[cv2.IMWRITE_JPEG_QUALITY,88])
         body=get_pose(job,frame_index,code)
         component=editor_component()
-        event=component(image=base64.b64encode(jpg).decode(),width=info["width"],height=info["height"],scene=f"{job['token']}:{code}:{frame_index}",phase=code,frame=frame_index,guides=job["guides"],body=body,primitives=primitives_for({**job,"shapes":[]},frame_index,cfg,code,custom_positions),shapes=job["shapes"],active_line=line,custom_visible=in_positions(frame_index,custom_positions,job["p_frames"]),ack=job["last_event"],key=f"editor_{job['token']}",default=None)
+        event=component(image=base64.b64encode(jpg).decode(),width=info["width"],height=info["height"],scene=f"{job['token']}:{code}:{frame_index}",phase=code,frame=frame_index,guides=job["guides"],body=body,primitives=primitives_for({**job,"shapes":[]},frame_index,cfg,code,custom_positions),shapes=job["shapes"],active_line=line,custom_visible=in_positions(frame_index,custom_positions,job["p_frames"]),sportsbox=sportsbox_overlay(job,code),ack=job["last_event"],key=f"editor_{job['token']}",default=None)
         next_phase=editor_phase_change(job,event,code,frame_index)
         if next_phase:
             st.session_state["active_p"]=next_phase
@@ -654,7 +758,7 @@ def main():
             cols=st.columns(5)
             for col,p in zip(cols,P_CODES[start:start+5]):
                 idx=job["p_frames"][p]
-                col.image(cv2.cvtColor(draw_annotations(read_frame(job["path"],idx),primitives_for(job,idx,cfg,p,custom_positions),p),cv2.COLOR_BGR2RGB),caption=f"{p} {idx}コマ",use_container_width=True)
+                col.image(cv2.cvtColor(draw_annotations(read_frame(job["path"],idx),primitives_for(job,idx,cfg,p,custom_positions),p,sportsbox_overlay(job,p)),cv2.COLOR_BGR2RGB),caption=f"{p} {idx}コマ",use_container_width=True)
     st.divider();st.subheader("3. 作成して保存する")
     a,b=st.columns(2)
     pauses=a.multiselect("動画で止めるP",P_CODES,default=["P1","P4","P7"],key="pause_positions",on_change=clear_outputs)
