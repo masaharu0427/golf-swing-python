@@ -27,7 +27,7 @@ import streamlit as st
 from streamlit.components.v1 import declare_component
 
 P_CODES = [f"P{i}" for i in range(1, 11)]
-P_NAMES = dict(zip(P_CODES, ["アドレス", "テイクバック", "ハーフウェイバック", "トップ", "切り返し", "デリバリー", "インパクト", "フォロー", "ハイフォロー", "フィニッシュ"]))
+P_NAMES = dict(zip(P_CODES, ["アドレス", "テイクバック", "ハーフウェイバック", "トップ", "リード腕が水平（ダウンスイング）", "デリバリー", "インパクト", "フォロー", "ハイフォロー", "フィニッシュ"]))
 LINE_NAMES = {"head":"頭の円（追従＋P1基準）", "spine":"胸と腰の中心線（前傾角）", "tilt":"胸と腰の傾き（正面）", "shoulders":"両肩のライン", "shaft":"シャフトプレーン", "hip":"ヒップライン", "ankles":"両足首の垂線", "vertical":"腰中心の垂直基準線", "back_vertical":"垂直基準線（身長程度）", "hip_right_knee":"腰の中心〜右ひざの中心"}
 COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0FDE32", "shaft":"#FFFFFF", "hip":"#FFCC55", "ankles":"#FFFF00", "vertical":"#43D9E6", "back_vertical":"#FFFFFF", "hip_right_knee":"#FFFF00"}
 LINE_NAMES["right_leg_outer"] = "右脚の外側（外くるぶし〜太ももの付け根）"
@@ -65,7 +65,7 @@ def video_info(path: str | Path) -> dict:
 def normalize_video(src: Path, dest: Path, max_side: int = 960) -> dict:
     # 全コマをRAMへ保持せず、向き・サイズ・フレームレートを先に統一する。
     scale = f"scale=w='min({max_side},iw)':h='min({max_side},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
-    run_ffmpeg(["-i", src, "-map", "0:v:0", "-vf", scale + ",fps=30", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-threads", "2", dest])
+    run_ffmpeg(["-i", src, "-map", "0:v:0", "-vf", scale + ",fps='min(source_fps,60)'", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-threads", "2", dest])
     return video_info(dest)
 
 
@@ -97,6 +97,17 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
     left_hip, right_hip = point(23), point(24)
     left_ankle, right_ankle = point(27), point(28)
     pose = {"head":head, "radius":max(.018, min(.10, ear_width*.75)), "ls":point(11), "rs":point(12), "sh":mid(11,12), "hip":mid(23,24), "rk":point(26), "wr":mid(15,16), "la":left_ankle, "ra":right_ankle}
+    wrist_visibilities = [float(lm[i].visibility) for i in (15, 16)]
+    pose.update(lw=point(15), rw=point(16), wrist_visibility=max(wrist_visibilities),
+                larm_visibility=min(float(lm[i].visibility) for i in (11, 15)),
+                rarm_visibility=min(float(lm[i].visibility) for i in (12, 16)))
+    if max(wrist_visibilities) >= .35:
+        # Give the more visible wrist extra weight when the other hand is occluded.
+        left_weight, right_weight = (max(.20, v) for v in wrist_visibilities)
+        pose["tracked_wr"] = [
+            (left * left_weight + right * right_weight) / (left_weight + right_weight)
+            for left, right in zip(pose["lw"], pose["rw"])
+        ]
     if all(valid_point(p) for p in (left_hip, right_hip, right_ankle)):
         # Pose landmarks are joint centers. Offset the endpoints toward the
         # outer edge in screen space to give the user an adjustable estimate.
@@ -139,27 +150,175 @@ def analyze_skeleton(path: Path, info: dict, progress=None) -> list:
         cap.release()
 
 
-def auto_positions(poses: list, fps: float, n: int) -> dict:
-    n = max(1,n)
-    fallback = dict(zip(P_CODES, [round((n-1)*i/9) for i in range(10)]))
-    valid = [(i,d) for i,d in enumerate(poses) if d]
-    if len(valid) < 10:
-        return fallback
-    tops = [(i,d) for i,d in valid if i < n*.75] or valid
-    top = min(tops, key=lambda x:x[1]["wr"][1])[0]
-    before = [(i,d) for i,d in valid if i < top-max(2,round(fps*.15))]
-    p1, slowest = (before[0][0] if before else 0), float("inf")
-    for (ia,a),(ib,b) in zip(before,before[1:]):
-        speed = math.dist(a["wr"],b["wr"])/max(1,ib-ia)
-        if b["wr"][1] > b["hip"][1]*.80 and speed < slowest:
-            p1, slowest = ib,speed
-    impacts = [(i,d) for i,d in valid if top+max(2,round(fps*.07)) <= i < top+round(fps*1.2)]
-    impact = max(impacts,key=lambda x:x[1]["wr"][1])[0] if impacts else min(n-1,top+max(1,round(fps*.25)))
-    finishes = [(i,d) for i,d in valid if i > impact+round(fps*.1)]
-    finish = min(finishes,key=lambda x:x[1]["wr"][1])[0] if finishes else n-1
-    a,b,c,z = min(p1,top),top,max(top,impact),max(impact,finish)
-    values = [a,a+(b-a)*.45,a+(b-a)*.75,b,b+(c-b)*.35,b+(c-b)*.7,c,c+(z-c)*.3,c+(z-c)*.65,z]
-    return dict(zip(P_CODES, [max(0,min(n-1,round(v))) for v in values]))
+def swing_pose_track(poses: list, fps: float, n: int, aspect: float, left_handed: bool):
+    """Build a smoothed, torso-scaled track. Bridge only short tracking gaps."""
+    lead, trail = ("r", "l") if left_handed else ("l", "r")
+    points = np.full((n, 5, 2), np.nan)
+    for i, pose in enumerate(poses[:n]):
+        if not pose or pose.get("wrist_visibility", 1.) < .35:
+            continue
+        values = [
+            pose.get("tracked_wr", pose.get("wr")), pose.get("hip"), pose.get("sh"),
+            pose.get(lead + "s"), pose.get(trail + "s"),
+        ]
+        if not all(valid_point(point) for point in values[:3]):
+            continue
+        points[i, :3] = values[:3]
+        for column, side in ((3, lead), (4, trail)):
+            shoulder, wrist = values[column], pose.get(side + "w")
+            if not valid_point(shoulder):
+                continue
+            if side + "w" not in pose:
+                wrist = values[0]  # Workspace data saved before separate wrists were tracked.
+            if valid_point(wrist) and pose.get(side + "arm_visibility", 1.) >= .40:
+                points[i, column] = np.subtract(wrist, shoulder)
+    points[:, :, 0] *= aspect
+    torso = np.linalg.norm(points[:, 1] - points[:, 2], axis=1)
+    usable = torso[np.isfinite(torso) & (torso > .03)]
+    if not len(usable):
+        return None
+    scale = float(np.median(usable))
+    observed = np.isfinite(points[:, :, 0])
+    smooth_radius = max(1, round(fps * .025))
+    max_gap = max(1, round(fps * .10))
+    weights = np.arange(1, smooth_radius + 2)
+    kernel = np.r_[weights, weights[-2::-1]]
+    kernel = kernel / kernel.sum()
+    for column in range(points.shape[1]):
+        valid = np.flatnonzero(observed[:, column])
+        for block in np.split(valid, np.flatnonzero(np.diff(valid) > max_gap + 1) + 1):
+            if not len(block):
+                continue
+            span = np.arange(block[0], block[-1] + 1)
+            for axis in range(2):
+                filled = np.interp(span, block, points[block, column, axis])
+                padded = np.pad(filled, smooth_radius, mode="edge")
+                points[span, column, axis] = np.convolve(padded, kernel, mode="valid")
+    return points / scale, observed[:, 0]
+
+
+def find_swing_anchors(wrist, height, speed, fps):
+    """Look for a rise, a downswing and a follow-through in one tracked segment."""
+    n = len(height)
+    candidates = np.flatnonzero(
+        (height[1:-1] >= height[:-2]) & (height[1:-1] > height[2:]) & (height[1:-1] > .35)
+    ) + 1
+    best = None
+    for top in candidates:
+        if top < 3 or n - top < 7:
+            continue
+        before = np.arange(max(0, top - round(6 * fps)), top - 2)
+        low = before[height[before] < .20]
+        if not len(low):
+            continue
+        # Use the last low-hand segment leading to this top, excluding earlier waggles.
+        low = np.split(low, np.flatnonzero(np.diff(low) > 1) + 1)[-1]
+        baseline = float(np.percentile(height[low], 30))
+        settled = low[(height[low] <= baseline + .13) & (speed[low] <= .85)]
+        setup = int(settled[-1] if len(settled) else low[0])
+        rise = height[top] - height[setup]
+        if rise < .58 or top - setup < max(3, round(.12 * fps)):
+            continue
+        downswing_limit = min(round(3 * fps), max(round(.65 * fps), top - setup))
+        after = np.arange(top + 3, min(n - 3, top + downswing_limit))
+        if not len(after):
+            continue
+        # A bottom near address height followed by a clear rise is consistent with impact.
+        bottoms = after[
+            (height[after] < height[after - 1])
+            & (height[after] <= height[after + 1])
+            & (height[after] < .25)
+            & (height[top] - height[after] >= .55)
+        ]
+        for strike in bottoms:
+            follow_span = min(n, strike + max(5, min(round(2.5 * fps), (strike - top) * 3)))
+            follow_rise = np.max(height[strike + 1:follow_span]) - height[strike]
+            if follow_rise < .45:
+                continue
+            attack = float(np.percentile(speed[top:strike + 1], 80))
+            release = float(np.percentile(speed[strike:follow_span], 80))
+            # The same segment should show a fast return and release near setup.
+            delta = np.linalg.norm(wrist[strike] - wrist[setup])
+            score = (
+                min(rise, 2.5) + min(follow_rise, 2.5)
+                + .40 * math.log1p(attack) + .30 * math.log1p(release)
+                - .8 * delta - .30 * (strike - top) / fps
+            )
+            if best is None or score > best[0]:
+                best = (score, setup, int(top), int(strike))
+    return best
+
+
+def auto_positions(poses: list, info: dict, left_handed: bool = False) -> tuple[dict, str]:
+    n, fps = info["frames"], info["fps"]
+    fallback = dict(zip(P_CODES, [round((n - 1) * i / 9) for i in range(10)]))
+    track = swing_pose_track(poses, fps, n, info["width"] / info["height"], left_handed)
+    if track is None:
+        return fallback, "manual"
+    points, observed = track
+    visible = np.flatnonzero(np.isfinite(points[:, 0, 0]))
+    swing = None
+    for segment in np.split(visible, np.flatnonzero(np.diff(visible) > 1) + 1):
+        if len(segment) < 10:
+            continue
+        first, last = int(segment[0]), int(segment[-1]) + 1
+        wrist, hip = points[first:last, :2].transpose(1, 0, 2)
+        height = hip[:, 1] - wrist[:, 1]
+        speed = np.linalg.norm(np.gradient(wrist - hip, axis=0), axis=1) * fps
+        anchors = find_swing_anchors(wrist, height, speed, fps)
+        if anchors and (swing is None or anchors[0] > swing[0][0]):
+            swing = anchors, first, height, speed
+    if swing is None:
+        return fallback, "manual"
+
+    (_, p1, p4, p7), first, height, speed = swing
+    arms = points[first:first + len(height), 3:, :]
+    # The vertical component comes from the shoulder-to-wrist line in the image.
+    arm_level = arms[:, :, 1] / np.maximum(.25, np.linalg.norm(arms, axis=2))
+    follow_limit = min(round(5 * fps), max(round(1.1 * fps), 7 * (p7 - p4)))
+    post_end = min(len(height), p7 + max(8, follow_limit))
+    follow = np.arange(p7 + 1, post_end)
+    crest = int(follow[np.argmax(height[follow])])
+    if crest < p7 + 3:
+        return fallback, "manual"
+
+    # Finish is the first sustained low-motion segment after the hands rise.
+    hold = max(2, round(.15 * fps))
+    finish = None
+    for index in range(max(p7 + 3, crest - hold + 1), post_end - hold + 1):
+        window = slice(index, index + hold)
+        if np.max(speed[window]) < .8 and np.min(height[window]) >= height[crest] - .30:
+            finish = index
+            break
+    needs_review = finish is None
+    p10 = finish if finish is not None else max(p7 + 3, crest)
+
+    def pick(lo, hi, error, expected, max_error=None):
+        nonlocal needs_review
+        frames = np.arange(lo, hi + 1)
+        valid = np.isfinite(error[frames])
+        if not np.any(valid):
+            needs_review = True
+            return int(frames[np.argmin(abs(frames - expected))])
+        frames = frames[valid]
+        # In a flat/missing signal, favor the frame closest to the expected crossing.
+        cost = abs(error[frames]) + .12 * abs(frames - expected) / max(1, hi - lo)
+        cost += .10 * ~observed[frames + first]
+        chosen = int(frames[np.argmin(cost)])
+        if max_error is not None and abs(error[chosen]) > max_error:
+            needs_review = True
+        return chosen
+
+    p3 = pick(p1 + 2, p4 - 1, arm_level[:, 0], p1 + .70 * (p4 - p1), .22)
+    p5 = pick(p4 + 1, p7 - 2, arm_level[:, 0], p4 + .35 * (p7 - p4), .22)
+    # Shaft-horizontal positions use hand height around the pelvis as a proxy.
+    p2 = pick(p1 + 1, p3 - 1, height, (p1 + p3) / 2)
+    p6 = pick(p5 + 1, p7 - 1, height, (p5 + p7) / 2)
+    p9 = pick(p7 + 2, min(p10 - 1, max(p7 + 2, crest)), arm_level[:, 1], p7 + .62 * (p10 - p7), .22)
+    p8 = pick(p7 + 1, p9 - 1, height, (p7 + p9) / 2)
+    frames = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10)
+    needs_review |= not all(observed[first + frame] for frame in frames)
+    return dict(zip(P_CODES, (first + frame for frame in frames))), "review" if needs_review else "estimated"
 
 
 def read_frame(path: str | Path, index: int) -> np.ndarray:
@@ -199,11 +358,11 @@ def rear_reference_x(ref: dict | None) -> float:
     return min(.99, max(.01, ref["ra"][0])) if ref else .65
 
 
-def build_job(path: Path, info: dict, poses: list, folder: Path, name: str) -> dict:
-    p_frames = auto_positions(poses,info["fps"],info["frames"])
-    ref = poses[p_frames["P1"]] if poses else None
+def build_job(path: Path, info: dict, poses: list, folder: Path, name: str, left_handed: bool = False) -> dict:
+    p_frames, position_status = auto_positions(poses, info, left_handed)
+    ref = poses[p_frames["P1"]] if p_frames["P1"] < len(poses) else None
     ref = ref or next((p for p in poses if p),None)
-    return {"token":uuid.uuid4().hex,"path":str(path),"folder":str(folder),"name":name,"info":info,"poses":poses,"p_frames":p_frames,"guides":initial_guides(ref,info),"body_overrides":{},"guides_manual":False,"shapes":[],"last_event":None,"output_video":None,"output_images":None}
+    return {"token":uuid.uuid4().hex,"path":str(path),"folder":str(folder),"name":name,"info":info,"poses":poses,"p_frames":p_frames,"position_status":position_status,"guides":initial_guides(ref,info),"body_overrides":{},"guides_manual":False,"shapes":[],"last_event":None,"output_video":None,"output_images":None}
 
 
 def in_positions(frame: int, selected: list, p_frames: dict) -> bool:
@@ -1001,7 +1160,7 @@ WORKSPACE_SETTINGS = {
     "active_p", "active_line", "camera_mode", "enabled_lines", "styles",
     "show_p1_reference", "target_side", "custom_positions", "show_phase_list",
     "pause_positions", "pause_seconds", "snapshot_positions", "upload_method",
-    "back_vertical_dash_initialized",
+    "back_vertical_dash_initialized", "swing_handedness",
 }
 
 
@@ -1137,8 +1296,9 @@ def render_app():
         with st.expander("読み込みの詳細設定"):
             do_ai=st.checkbox("AI骨格解析を行う",value=True)
             max_side=st.selectbox("解析用動画の長辺",[720,960],index=1,format_func=lambda x:f"{x}px")
-            st.caption("処理を軽くするため30fps・選択した解像度へ変換します。高速度撮影の元動画は残してください。")
+            st.caption("元動画のフレームレートを最大60fpsまで保持し、選択した解像度に変換します。")
     st.subheader("1. 動画を選ぶ")
+    handedness = st.radio("スイングの利き打ち", ["右打ち", "左打ち"], horizontal=True, key="swing_handedness")
     upload_method=st.radio("動画の取り込み方法",["通常（PCなど）","Android向け（分割送信）"],horizontal=True,key="upload_method")
     if upload_method=="Android向け（分割送信）":
         uploaded=mobile_upload("video", st.session_state.setdefault("android_upload_state", {}), "android_upload_widget")
@@ -1164,7 +1324,7 @@ def render_app():
                 except Exception as exc:
                     st.warning(f"骨格解析ができませんでした：{exc}\nシャフト・ヒップと手描き線は利用できます。")
             previous=st.session_state.get("job")
-            st.session_state["job"]=build_job(path,info,poses,folder,uploaded.name)
+            st.session_state["job"]=build_job(path, info, poses, folder, uploaded.name, left_handed=handedness == "左打ち")
             st.session_state["active_p"]="P1"
             st.session_state.pop("restore_view", None)
             if previous:shutil.rmtree(previous["folder"],ignore_errors=True)
@@ -1259,7 +1419,11 @@ def render_app():
         if accept_editor_event(job,event,code,frame_index):st.rerun()
     st.caption(f"{code}　｜　{frame_index}コマ / {frame_index/info['fps']:.2f}秒　｜　コマ調整・線の移動は自動反映")
     if not body:st.caption("このコマでは骨格を検出できませんでした。別のコマに調整するか、手描き直線を使ってください。")
-    st.caption("AIのポジションは候補です。特にインパクトは映像を見て微調整してください。線は3点指定ではなく、丸や線を直接ドラッグします。")
+    if job.get("position_status") == "manual":
+        st.warning("スイングの流れを判定できなかったため、コマは等間隔の仮置きです。映像を見ながら各Pを設定してください。")
+    elif job.get("position_status") == "review":
+        st.warning("腕の水平やフィニッシュを判定しにくい箇所があります。P一覧で候補を確認してください。")
+    st.caption("P2・P6・P8は手元の高さ、P7は手元が下がってから上がる動きで推定します。シャフトの水平とボールの接触は映像で確認してください。")
     if st.checkbox("P1〜P10を一覧表示",key="show_phase_list"):
         for start in range(0,10,5):
             cols=st.columns(5)
