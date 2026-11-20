@@ -458,14 +458,17 @@ def sportsbox_overlay(job: dict, phase: str) -> str | None:
     if all(angles.get(metric) is not None for metric in SPORTSBOX_METRICS):
         values = "   ".join(f"{name} {angles[metric]}°" for metric, name in SPORTSBOX_METRICS.items())
         lines.append(f"回転角度   {values}")
-    sway = job.get("sportsbox_sway", {}).get(phase, {})
-    values = []
-    for metric, name in SPORTSBOX_METRICS.items():
-        if sway.get(metric) is not None:
-            number = f"{sway[metric]:.2f}".rstrip("0").rstrip(".")
-            values.append(f"{name} {number}″")
-    if values:
-        lines.append("Sway   " + "   ".join(values))
+    sway = job.get("sportsbox_sway", {})
+    sway_rows = {
+        "P4": (("P4", "Sway"), ("BS_MAX", "バックスイングMAX"), ("SLIDE", "切り替えスライド")),
+        "P7": (("P7", "Sway"),),
+    }
+    for code, label in sway_rows.get(phase, ()):
+        row = sway.get(code, {})
+        values = [f"{name} {row[metric]:.2f}".rstrip("0").rstrip(".") + "″"
+                  for metric, name in SPORTSBOX_METRICS.items() if row.get(metric) is not None]
+        if values:
+            lines.append(label + "   " + "   ".join(values))
     return "\n".join(lines) or None
 
 
@@ -918,6 +921,12 @@ def refresh_pose_points(job: dict, keys: tuple, progress) -> int:
 
 # Sportsbox Turn screenshot recognition.
 SPORTSBOX_POSITIONS = {"P1": "Address", "P4": "TOP", "P7": "IMPACT"}
+SPORTSBOX_SWAY_POSITIONS = {
+    "BS_MAX": "バックスイングMAX",
+    "P4": "P4 · TOP",
+    "SLIDE": "スライド（切り替え）",
+    "P7": "P7 · IMPACT",
+}
 SPORTSBOX_METRICS = {"chest": "胸", "pelvis": "骨盤"}
 SPORTSBOX_REFERENCE_SIZE = (2048, 946)
 # Address, Top, and the first card immediately after DAH (Impact).
@@ -1332,8 +1341,8 @@ def _read_sportsbox_layout(image):
     return values
 
 
-def merge_sportsbox_readings(readings: list[dict]) -> tuple[dict, list]:
-    values = {code: {} for code in SPORTSBOX_POSITIONS}
+def merge_sportsbox_readings(readings: list[dict], positions=SPORTSBOX_POSITIONS) -> tuple[dict, list]:
+    values = {code: {} for code in positions}
     conflicts = []
     for code in values:
         for metric in SPORTSBOX_METRICS:
@@ -1348,7 +1357,11 @@ def merge_sportsbox_readings(readings: list[dict]) -> tuple[dict, list]:
 def clear_sportsbox_image(import_key: str, keep_if_selected: str | None = None) -> None:
     job = st.session_state.get("job")
     if job and (keep_if_selected is None or not st.session_state.get(keep_if_selected)):
-        job.pop(import_key, None)
+        previous = job.pop(import_key, None)
+        if import_key == "sportsbox_sway_import" and previous:
+            manual = {code: previous["values"].get(code, {}) for code in ("BS_MAX", "SLIDE")}
+            if any(value is not None for row in manual.values() for value in row.values()):
+                job[import_key] = {"id": "manual", "values": manual, "read_count": 0, "error": None}
     clear_outputs()
 
 
@@ -1386,6 +1399,14 @@ def parse_sportsbox_input(raw: str, sway: bool) -> int | float | None:
     return value
 
 
+def calculate_sway_slide(values: dict, metric: str) -> float | None:
+    top = values.get("P4", {}).get(metric)
+    maximum = values.get("BS_MAX", {}).get(metric)
+    if top is None or maximum is None:
+        return None
+    return round(top - maximum, 2)
+
+
 def sportsbox_data_inputs(job: dict, sway: bool) -> None:
     token = job["token"]
     prefix = "sportsbox_sway" if sway else "sportsbox"
@@ -1394,6 +1415,7 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
     category = "Sway" if sway else "Turn"
     field = "Sway（″）" if sway else "回転角（°）"
     example = "-2.1" if sway else "-89"
+    positions = SPORTSBOX_SWAY_POSITIONS if sway else SPORTSBOX_POSITIONS
     user_agent = st.context.headers.get("User-Agent", "")
     default_mobile = bool(re.search(r"Android|iPhone|iPad|iPod|Mobile", user_agent, re.I))
     methods = ("通常", "スマホ向け（分割送信）", "手入力")
@@ -1456,16 +1478,18 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
                         errors.append(f"{image.name} — {exc}")
                     except (OSError, Image.DecompressionBombError):
                         errors.append(f"{image.name} — 画像を開けませんでした。")
-        detected, conflicts = merge_sportsbox_readings(readings)
+        detected, conflicts = merge_sportsbox_readings(readings, positions)
         values = copy.deepcopy(detected)
-        if state and source_files:
+        if state:
             previous_files = state.get("source_files") or [state["id"].split(":")[0]]
-            if set(previous_files).issubset(source_files):
-                for code, metrics in state["values"].items():
-                    for metric, value in metrics.items():
-                        old_auto = state.get("detected", {}).get(code, {}).get(metric)
-                        if value is not None and value != old_auto and (code, metric) not in conflicts:
-                            values[code][metric] = value
+            same_images = bool(source_files) and set(previous_files).issubset(source_files)
+            for code, metrics in state["values"].items():
+                if code not in positions or (not same_images and code not in ("BS_MAX", "SLIDE")):
+                    continue
+                for metric, value in metrics.items():
+                    old_auto = state.get("detected", {}).get(code, {}).get(metric)
+                    if value is not None and value != old_auto and (code, metric) not in conflicts:
+                        values[code][metric] = value
         state = {
             "id": source_id, "method": method, "name": names, "source_files": source_files,
             "values": values, "error": "\n\n".join(errors), "read_count": sum(map(len, detected.values())),
@@ -1477,18 +1501,25 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
         st.warning(state["error"])
     if method != "手入力" and source_id != "manual":
         count = state["read_count"]
+        if sway:
+            detected = state.get("detected", {})
+            count = sum(len(detected.get(code, {})) for code in ("P4", "P7"))
         if count:
-            st.caption(f"画像から読み取った値　{count} / 6")
-        elif not state["error"] and not state.get("conflicts"):
+            st.caption(f"画像から読み取った値　{count} / {4 if sway else 6}")
+        elif not state["error"] and not state.get("conflicts") and (not sway or "detected" in state):
             st.warning(f"{category}を読み取れませんでした。Chest {category}・Pelvis {category}の行とポジションのラベルが入る画像を選ぶか、下の欄に入力してください。")
-        conflicts = state.get("conflicts", [])
+        conflicts = [(code, metric) for code, metric in state.get("conflicts", []) if code in positions]
         if conflicts:
             labels = "、".join(f"{code} {SPORTSBOX_METRICS[metric]}" for code, metric in conflicts)
             st.warning(f"画像間で値が異なる項目があります。元画像を照合して入力してください。対象は {labels} です。")
     st.caption("空欄にも直接入力できます。入力後はEnterを押すか、欄の外をタップしてください。")
+    if sway:
+        st.caption("バックスイングMAXは符号付きで入力します。スライドは空欄の場合、TOP − MAXで計算します。")
     values = {}
-    for col, (code, position) in zip(st.columns(3), SPORTSBOX_POSITIONS.items()):
-        col.markdown(f"**{code} · {position}**")
+    slide = {}
+    for col, (code, position) in zip(st.columns(len(positions)), positions.items()):
+        heading = position if sway else f"{code} · {position}"
+        col.markdown(f"**{heading}**")
         values[code] = {}
         for metric, name in SPORTSBOX_METRICS.items():
             value = state["values"].get(code, {}).get(metric)
@@ -1500,13 +1531,19 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
                 key=key, on_change=clear_outputs,
             )
             try:
-                values[code][metric] = parse_sportsbox_input(raw, sway)
+                parsed = parse_sportsbox_input(raw, sway)
+                values[code][metric] = parsed
+                if code == "SLIDE":
+                    slide[metric] = parsed if parsed is not None else calculate_sway_slide(values, metric)
+                    if parsed is None and slide[metric] is not None:
+                        col.caption(f"{name}の自動計算 {slide[metric]:g}″")
             except ValueError as exc:
                 values[code][metric] = None
                 col.caption(f"{name}の入力を確認してください。{exc} 入力例 {example}")
     state["values"] = values
-    job[output_key] = values
-    if source_id != "manual" and any(value is None for pair in values.values() for value in pair.values()):
+    job[output_key] = {**values, "SLIDE": slide} if sway else values
+    image_positions = ("P4", "P7") if sway else SPORTSBOX_POSITIONS
+    if source_id != "manual" and any(value is None for code in image_positions for value in values[code].values()):
         st.info("読み取れなかった値は空欄です。画像を見ながら入力できます。")
 
 
