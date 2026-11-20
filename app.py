@@ -452,24 +452,23 @@ def pil_font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def sway_value_color(code: str, value: float) -> str:
-    if code == "BS_MAX":
-        in_range = abs(value) <= 1.4
-    elif code == "SLIDE":
-        in_range = .6 <= value <= 1.84
-    elif code == "P7":
-        in_range = 3.7 <= value <= 5.9
-    else:  # Sway at TOP.
-        in_range = -1.0 <= value <= 1.07
-    return "#11E30D" if in_range else "#F41A1A"
+def sportsbox_value_color(value: float, bounds: tuple[float, float]) -> str:
+    low, high = bounds
+    return "#11E30D" if low <= value <= high else "#F41A1A"
 
 
-def sportsbox_overlay(job: dict, phase: str) -> list[list[tuple[str, str, str]]]:
+def sportsbox_overlay(job: dict, phase: str) -> list[list[list[tuple[str, str]]]]:
     panels = []
+    profile = job.get("sportsbox_iron_profile", "male")
+    ranges = SPORTSBOX_IRON_RANGES.get(profile, SPORTSBOX_IRON_RANGES["male"])
     angles = job.get("sportsbox_angles", {}).get(phase, {})
     if job.get("sportsbox_show_turn", True) and all(angles.get(metric) is not None for metric in SPORTSBOX_METRICS):
-        values = "   ".join(f"{name} {angles[metric]}°" for metric, name in SPORTSBOX_METRICS.items())
-        panels.append([(f"回転角度   {values}", "", "")])
+        turn_line = [("回転角度", "white")]
+        for metric, name in SPORTSBOX_METRICS.items():
+            value = angles[metric]
+            color = sportsbox_value_color(value, ranges["turn_top"][metric]) if phase == "P4" else "white"
+            turn_line.extend([(f"   {name} ", "white"), (f"{value}°", color)])
+        panels.append([turn_line])
     if not job.get("sportsbox_show_sway", True):
         return panels
     sway = job.get("sportsbox_sway", {})
@@ -482,14 +481,14 @@ def sportsbox_overlay(job: dict, phase: str) -> list[list[tuple[str, str, str]]]
         value = sway.get(code, {}).get("pelvis")
         if value is not None:
             number = f"{value:.2f}".rstrip("0").rstrip(".") + "″"
-            lines.append((f"{label}   骨盤 ", number, sway_value_color(code, value)))
+            lines.append([(f"{label}   骨盤 ", "white"), (number, sportsbox_value_color(value, ranges["sway"][code]))])
     if lines:
         panels.append(lines)
     return panels
 
 
 def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
-                     sportsbox: list[list[tuple[str, str, str]]] | None = None) -> np.ndarray:
+                     sportsbox: list[list[list[tuple[str, str]]]] | None = None) -> np.ndarray:
     im = Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(im)
     w,h = im.size
@@ -543,8 +542,8 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
         pad = max(4, round(size * .35))
         top = margin
         for lines in sportsbox:
-            boxes = [draw.textbbox((0, 0), prefix + number, font=font, anchor="rs", stroke_width=stroke)
-                     for prefix, number, _ in lines]
+            boxes = [draw.textbbox((0, 0), "".join(text for text, _ in line),
+                                   font=font, anchor="rs", stroke_width=stroke) for line in lines]
             x = w - margin - pad - max(box[2] for box in boxes)
             line_height = max(box[3] - box[1] for box in boxes)
             step = line_height + stroke + 2
@@ -553,14 +552,13 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
                 (x + min(box[0] for box in boxes) - pad, top, w - margin, bottom),
                 fill=(0, 0, 0, 166),
             )
-            for i, ((prefix, number, color), box) in enumerate(zip(lines, boxes)):
+            for i, (line, box) in enumerate(zip(lines, boxes)):
                 y = top + pad + i * step - box[1]
-                prefix_x = x - draw.textlength(number, font=font)
-                draw.text((prefix_x, y), prefix, font=font, fill="white",
-                          anchor="rs", stroke_width=stroke, stroke_fill="black")
-                if number:
-                    draw.text((x, y), number, font=font, fill=color,
+                right = x
+                for text, color in reversed(line):
+                    draw.text((right, y), text, font=font, fill=color,
                               anchor="rs", stroke_width=stroke, stroke_fill="black")
+                    right -= draw.textlength(text, font=font)
             top = bottom + pad + 1
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
@@ -762,7 +760,7 @@ function drawSportsbox(panels){
     ctx.strokeStyle='#000';
     let top=margin;
     for(const lines of panels){
-        const metrics=lines.map(([prefix,number])=>ctx.measureText(prefix+number));
+        const metrics=lines.map(line=>ctx.measureText(line.map(([text])=>text).join('')));
         const ascent=Math.max(...metrics.map(m=>m.actualBoundingBoxAscent));
         const descent=Math.max(...metrics.map(m=>m.actualBoundingBoxDescent));
         const step=ascent+descent+2*stroke+2;
@@ -772,16 +770,15 @@ function drawSportsbox(panels){
         const bottom=y+descent+stroke+pad+(lines.length-1)*step;
         ctx.fillStyle='rgba(0,0,0,.65)';
         ctx.fillRect(left,top,canvas.width-margin-left,bottom-top);
-        lines.forEach(([prefix,number,color],i)=>{
+        lines.forEach((line,i)=>{
             const baseline=y+i*step;
-            const prefixX=x-ctx.measureText(number).width;
-            ctx.fillStyle='#fff';
-            ctx.strokeText(prefix,prefixX,baseline);
-            ctx.fillText(prefix,prefixX,baseline);
-            if(number){
+            let right=x;
+            for(let j=line.length-1;j>=0;j--){
+                const [text,color]=line[j];
                 ctx.fillStyle=color;
-                ctx.strokeText(number,x,baseline);
-                ctx.fillText(number,x,baseline);
+                ctx.strokeText(text,right,baseline);
+                ctx.fillText(text,right,baseline);
+                right-=ctx.measureText(text).width;
             }
         });
         top=bottom+pad+1;
@@ -967,6 +964,17 @@ SPORTSBOX_SWAY_POSITIONS = {
 }
 SPORTSBOX_METRICS = {"chest": "胸", "pelvis": "骨盤"}
 SPORTSBOX_SWAY_METRICS = {"pelvis": SPORTSBOX_METRICS["pelvis"]}
+SPORTSBOX_IRON_LABELS = {"male": "男性アイアン", "female": "女性アイアン"}
+SPORTSBOX_IRON_RANGES = {
+    "male": {
+        "turn_top": {"pelvis": (-41, -30), "chest": (-98, -88)},
+        "sway": {"P4": (-1.0, 1.07), "P7": (3.7, 5.9), "BS_MAX": (-1.4, 1.4), "SLIDE": (.6, 1.84)},
+    },
+    "female": {
+        "turn_top": {"pelvis": (-45, -28), "chest": (-102, -90)},
+        "sway": {"P4": (-.9, .5), "P7": (2.7, 4.7), "BS_MAX": (-.7, .7), "SLIDE": (.5, 1.5)},
+    },
+}
 SPORTSBOX_REFERENCE_SIZE = (2048, 946)
 # Address, Top, and the first card immediately after DAH (Impact).
 # Coordinates are for the reference Turn screen, excluding the LIVE column.
@@ -1471,6 +1479,13 @@ def sportsbox_settings(job: dict) -> None:
     if not st.checkbox("Sportsboxのデータを表示する（オプション）",
                        key=f"sportsbox_enabled_{token}", on_change=clear_outputs):
         return
+    profile_widget = f"sportsbox_iron_profile_{token}"
+    if profile_widget not in st.session_state:
+        st.session_state[profile_widget] = job.get("sportsbox_iron_profile", "male")
+    job["sportsbox_iron_profile"] = st.radio(
+        "色分けの基準", tuple(SPORTSBOX_IRON_LABELS), format_func=SPORTSBOX_IRON_LABELS.__getitem__,
+        key=profile_widget, horizontal=True, on_change=clear_outputs,
+    )
     display_options = (("sportsbox_show_turn", "回転角を表示"), ("sportsbox_show_sway", "Swayを表示"))
     for column, (setting, label) in zip(st.columns(2), display_options):
         widget = f"{setting}_{token}"
@@ -1739,6 +1754,7 @@ def save_workspace() -> None:
     keys = WORKSPACE_SETTINGS | {
         f"sportsbox_enabled_{token}", f"sportsbox_method_{token}", f"sportsbox_sway_method_{token}",
         f"sportsbox_show_turn_{token}", f"sportsbox_show_sway_{token}",
+        f"sportsbox_iron_profile_{token}",
     }
     settings = {key: state[key] for key in keys if key in state}
     saved_job = {key: value for key, value in job.items()
