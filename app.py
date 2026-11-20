@@ -1002,6 +1002,21 @@ SPORTSBOX_SWAY_TITLES = {
 }
 
 
+# Card layouts sampled from the Sway screen. The badge is right-aligned.
+# Each offset locates the center of the card relative to the badge text.
+SPORTSBOX_SWAY_CARDS = {
+    "P4": ((1033, 276, 1098, 311), -96.5, "000001e00000fffe1ff81ffe7ffe3ffc1fff03c03c0e1e0f03c0700f1c0703c0f0079c0303c0f0079c0303c0e0079fff03c0e0079fff03c0f0079ffc03c0f0079ff803c070071e0003c03c0e1c0003c03ffc1c0003c01ff81c00000007e00000"),
+    "P7": ((1312, 276, 1405, 311), -82.5, "000000001000cc19f8707cffcc19f870feffce198c71c618ce198cd98618ce398cd98018ce398cd98018cf39fc998018cf79fd998018cb79f9d98018c9d9f1f98018c9d981f98618c9d981fdc618c899818cfe18c89981047c18000000003800"),
+    "BS_MAX": ((1595, 276, 1720, 311), -67.5, "00800400000cf1e44e66589ef3e4df66599ed334996658b39b35992659b39a05982edca0f2079c2edca0f6070e2a94a3fe07072a97a79a07833b9323ca05813b93a18b34919993b3db34d91991b3f9e4df19919ef1e44f19919e00c00600000c"),
+    "SLIDE": ((1886, 276, 2018, 311), -59.0, "000000800180f38cc9cbd399ffccc9cbd3d924cccb499259244cca499649245ceb09946d24deeb99947d27d6e9c9947d2792e9c9947f2796b849947b279ed869947b249eda69965b249edb69925b24b2d9c993db24d2c9c993d9000000800180"),
+}
+SPORTSBOX_SLIDE_TITLES = {
+    "chest": "0ff07000000000001ff87000000000183efc700000000038381e700000000078700c77e03f03f0ff70087fe07f03fcfff0007ff0ff87fc7ff0007871c1c70c18f0007831ddc7e018f0007031ffc3f81870007031e000fc18700c7031c0001e18381e7031e1860e183e7c7030f3c71c1c1ff870307f83fc1f07e070303f01f81f",
+    "pelvis": "ff00006000380000ff80006000180000ffc0006000000000c0e0006000000000e0e1f06302107e00c0e3f86387387f00c0e71c618738e380e0e70c608638e000ffcf0c60c638f000ff8ffc60ce387f00fc0ffc60ec381f80c00e0060fc380381e0071c6078386380c007fc607838ff80e003f86078387f800000e00000001c00",
+}
+SPORTSBOX_SLIDE_WORD = "3f038c00e0003f838c00e0007fc38000e000e0e38000e000e0e38c0fe0f8f0038c3fe1fe78038c3fe1fe7f038c78e3860fc38c70e3ff03e38c6067ff00e38c6067fec0f38c60e780e0e38c70e304f9e38c38e3ce7fc38c3fe1fe3f838c1fe0fc"
+
+
 def _sportsbox_color_mask(crop):
     rgb = np.asarray(crop)
     return (rgb.max(axis=2) > 140) & (np.ptp(rgb, axis=2) > 65)
@@ -1297,6 +1312,44 @@ def _read_shifted_sportsbox_layout(image, values, sway=False):
     return values
 
 
+def _read_sway_cards(image):
+    image = image.resize(SPORTSBOX_REFERENCE_SIZE, SPORTSBOX_RESAMPLE)
+    white = _sportsbox_white_mask(image)
+    readings = {}
+    for code, (box, number_offset, badge) in SPORTSBOX_SWAY_CARDS.items():
+        cards = {}
+        titles = SPORTSBOX_SLIDE_TITLES if code == "SLIDE" else SPORTSBOX_SWAY_TITLES
+        title_width = 90 if code == "SLIDE" else 144
+        badge_matches = _sportsbox_word_matches(white, box, [badge], (1750, 640))
+        centers = []
+        for _, badge_x, badge_y in badge_matches:
+            if any(abs(badge_x - x) < 8 and abs(badge_y - y) < 8 for x, y in centers):
+                continue
+            centers.append((badge_x, badge_y))
+            number_x = badge_x + number_offset
+            tx, ty = round(number_x - 146), round(badge_y - 26)
+            title_box = (tx, ty, tx + title_width, ty + 31)
+            candidates = []
+            for metric, title in titles.items():
+                title_matches = _sportsbox_word_matches(white, title_box, [title], (46, 14))
+                if title_matches:
+                    candidates.append((title_matches[0][0], metric))
+            candidates.sort()
+            if not candidates or (len(candidates) > 1 and candidates[1][0] - candidates[0][0] < .025):
+                continue
+            if code == "SLIDE":
+                slide_box = (tx, ty + 26, tx + 85, ty + 57)
+                if not _sportsbox_word_matches(white, slide_box, [SPORTSBOX_SLIDE_WORD], (115, 25)):
+                    continue
+            metric = candidates[0][1]
+            value = _sportsbox_read_shifted_number(image, number_x, badge_y + 55, 290, sway=True)
+            if value is not None:
+                cards.setdefault(metric, set()).add(value)
+        readings[code] = {metric: next(iter(numbers)) for metric, numbers in cards.items()
+                          if len(numbers) == 1}
+    return readings
+
+
 def read_sportsbox_angles(data, sway=False):
     """Return detected values, leaving unconfirmed cells empty."""
     with Image.open(io.BytesIO(data)) as source:
@@ -1314,7 +1367,12 @@ def read_sportsbox_angles(data, sway=False):
         values = {code: {} for code in SPORTSBOX_POSITIONS}
         if not sway and abs(candidate.width / candidate.height - SPORTSBOX_REFERENCE_SIZE[0] / SPORTSBOX_REFERENCE_SIZE[1]) <= .06:
             values = _read_sportsbox_layout(candidate)
-        results.append(_read_shifted_sportsbox_layout(candidate, values, sway))
+        _read_shifted_sportsbox_layout(candidate, values, sway)
+        if sway:
+            for code, metrics in _read_sway_cards(candidate).items():
+                if metrics:
+                    values.setdefault(code, {}).update(metrics)
+        results.append(values)
     return max(results, key=lambda values: sum(map(len, values.values())))
 
 
@@ -1442,7 +1500,8 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
             type=["png", "jpg", "jpeg", "webp"],
             accept_multiple_files=sway, key=upload_key, on_change=clear_sportsbox_image,
             args=(import_key, upload_key if sway else None),
-            help=f"各画像にChest {category}またはPelvis {category}の項目名と、ポジションのラベルを入れてください。P7を読むにはDAHとその右隣の数値が必要です。",
+            help=("Chest Sway・Pelvis Swayの数値カードを、TOP・IMPACT・BCKSWNG・TRANSITIONなどのラベルごと入れてください。"
+                  if sway else "胸・骨盤のTurnカードとポジションのラベルを入れてください。"),
         )
         screenshots = (uploaded or []) if sway else ([uploaded] if uploaded else [])
 
@@ -1454,7 +1513,7 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
     elif screenshots:
         if sway:
             digest = hashlib.sha256(json.dumps(source_files).encode()).hexdigest()[:24]
-            source_id = f"{digest}:sway-v2"
+            source_id = f"{digest}:sway-v3"
         else:
             source_id = f"{source_files[0]}:turn-v2"
         st.caption(f"画像を受信しました　{names}")
@@ -1503,18 +1562,18 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
         count = state["read_count"]
         if sway:
             detected = state.get("detected", {})
-            count = sum(len(detected.get(code, {})) for code in ("P4", "P7"))
+            count = sum(len(detected.get(code, {})) for code in positions)
         if count:
-            st.caption(f"画像から読み取った値　{count} / {4 if sway else 6}")
+            st.caption(f"画像から読み取った値　{count} / {len(positions) * len(SPORTSBOX_METRICS)}")
         elif not state["error"] and not state.get("conflicts") and (not sway or "detected" in state):
             st.warning(f"{category}を読み取れませんでした。Chest {category}・Pelvis {category}の行とポジションのラベルが入る画像を選ぶか、下の欄に入力してください。")
         conflicts = [(code, metric) for code, metric in state.get("conflicts", []) if code in positions]
         if conflicts:
-            labels = "、".join(f"{code} {SPORTSBOX_METRICS[metric]}" for code, metric in conflicts)
+            labels = "、".join(f"{positions[code]} {SPORTSBOX_METRICS[metric]}" for code, metric in conflicts)
             st.warning(f"画像間で値が異なる項目があります。元画像を照合して入力してください。対象は {labels} です。")
     st.caption("空欄にも直接入力できます。入力後はEnterを押すか、欄の外をタップしてください。")
     if sway:
-        st.caption("バックスイングMAXは符号付きで入力します。スライドは空欄の場合、TOP − MAXで計算します。")
+        st.caption("MAXとスライドも画像から読み取ります。スライドが空欄の場合は、TOP − MAXで計算します。")
     values = {}
     slide = {}
     for col, (code, position) in zip(st.columns(len(positions)), positions.items()):
@@ -1542,8 +1601,7 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
                 col.caption(f"{name}の入力を確認してください。{exc} 入力例 {example}")
     state["values"] = values
     job[output_key] = {**values, "SLIDE": slide} if sway else values
-    image_positions = ("P4", "P7") if sway else SPORTSBOX_POSITIONS
-    if source_id != "manual" and any(value is None for code in image_positions for value in values[code].values()):
+    if source_id != "manual" and any(value is None for row in job[output_key].values() for value in row.values()):
         st.info("読み取れなかった値は空欄です。画像を見ながら入力できます。")
 
 
