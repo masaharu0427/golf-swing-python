@@ -457,7 +457,9 @@ def sway_value_color(code: str, value: float) -> str:
         in_range = abs(value) <= 1.4
     elif code == "SLIDE":
         in_range = .6 <= value <= 1.84
-    else:  # Sway at TOP or IMPACT.
+    elif code == "P7":
+        in_range = 3.7 <= value <= 5.9
+    else:  # Sway at TOP.
         in_range = -1.0 <= value <= 1.07
     return "#11E30D" if in_range else "#F41A1A"
 
