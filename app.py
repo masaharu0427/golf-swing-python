@@ -1056,6 +1056,172 @@ def _sportsbox_read_number(image, y, bounds, digit_templates):
     return value if -180 <= value <= 180 else None
 
 
+def _sportsbox_word_matches(white, box, templates, search):
+    """Locate a label from its shape without assuming the original crop starts at (0, 0)."""
+    x0, y0, x1, y1 = box
+    dx, dy = search
+    left, right = max(0, x0 - dx), min(white.shape[1], x1 + dx)
+    top, bottom = max(0, y0 - dy), min(white.shape[0], y1 + dy)
+    region = white[top:bottom, left:right]
+    expected_x, expected_y = (x0 + x1) / 2, (y0 + y1) / 2
+    size = (len(templates[0]) // 4, 16)
+    word_gap = 16 if size[0] == 64 else 8
+    seen = set()
+    best = []
+    for strip_height in (24, 34, 46):
+        for y in range(0, len(region) - strip_height + 1, 6):
+            strip = region[y:y + strip_height]
+            occupied = np.flatnonzero(strip.any(axis=0))
+            if not len(occupied):
+                continue
+            splits = np.flatnonzero(np.diff(occupied) > word_gap) + 1
+            for columns in np.split(occupied, splits):
+                a, b = columns[0], columns[-1] + 1
+                width = b - a
+                if not .40 * (x1 - x0) <= width <= 1.30 * (x1 - x0):
+                    continue
+                word = strip[:, a:b]
+                ys = np.flatnonzero(word.any(axis=1))
+                if ys[0] == 0 or ys[-1] == strip_height - 1 or not 11 <= ys[-1] - ys[0] + 1 <= 34:
+                    continue
+                bounds = (a + left, y + top + ys[0], b + left, y + top + ys[-1] + 1)
+                if bounds in seen:
+                    continue
+                seen.add(bounds)
+                sample = _sportsbox_fingerprint(word, size)
+                error = min(_sportsbox_distance(sample, ref) for ref in templates)
+                if error <= .19:
+                    cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
+                    cost = error + .035 * abs(cx - expected_x) / max(1, dx) + .035 * abs(cy - expected_y) / max(1, dy)
+                    best.append((cost, cx, cy))
+    return sorted(best)
+
+
+def _sportsbox_read_shifted_number(image, x, y, card_width):
+    left = max(0, round(x - card_width * .46))
+    right = min(image.width, round(x + card_width * .46))
+    top = max(0, round(y - 13))
+    bottom = min(image.height, round(y + 73))
+    if right - left < 20 or bottom - top < 15:
+        return None
+    rgb = np.asarray(image.crop((left, top, right, bottom)))
+    bright, chroma = rgb.max(axis=2), np.ptp(rgb, axis=2)
+    templates = SPORTSBOX_GLYPH_TEMPLATES["digits"]
+
+    def read_mask(mask):
+        groups = list(_sportsbox_glyphs(mask))
+        decoded = []
+        for a, b, gy, glyph in groups:
+            gh, gw = glyph.shape
+            if not 26 <= gh <= 58 or not 8 <= gw <= .95 * gh:
+                decoded.append(None)
+                continue
+            fp = _sportsbox_fingerprint(glyph, (16, 24))
+            scores = sorted((min(_sportsbox_distance(fp, ref) for ref in refs), digit)
+                            for digit, refs in templates.items())
+            score, digit = scores[0]
+            decoded.append(digit if score <= .17 and scores[1][0] - score >= .03 else None)
+
+        hits = []
+        for k, (degree_left, degree_right, gy, glyph) in enumerate(groups):
+            gh, gw = glyph.shape
+            if not 8 <= gh <= 29 or not .55 <= gw / gh <= 1.55 or not k:
+                continue
+            j = k
+            while j and decoded[j - 1] is not None and groups[j][0] - groups[j - 1][1] <= 17:
+                j -= 1
+            if not 1 <= k - j <= 3:
+                continue
+            first_digit = groups[j]
+            digit_y, digit_h = first_digit[2], first_digit[3].shape[0]
+            if abs(gy - digit_y) > .32 * digit_h or not .23 <= gh / digit_h <= .65:
+                continue
+            if any(abs(group[2] - digit_y) > .17 * digit_h or abs(group[3].shape[0] - digit_h) > .20 * digit_h
+                   for group in groups[j:k]):
+                continue
+            signed = False
+            start = first_digit[0]
+            if j and start - groups[j - 1][1] <= 17:
+                sign_left, _, sy, sign = groups[j - 1]
+                sh, sw = sign.shape
+                sign_center = sy + sh / 2
+                if not (.35 * digit_h <= sign_center - digit_y <= .80 * digit_h
+                        and .20 * digit_h <= sw <= .78 * digit_h):
+                    continue
+                if sh <= .25 * digit_h and sw >= 1.7 * sh:
+                    signed = True
+                elif not (.70 <= sw / sh <= 1.4 and sh <= .75 * digit_h
+                          and sign[sh // 2].mean() >= .65 and sign[:, sw // 2].mean() >= .65):
+                    continue
+                start = sign_left
+            center_error = abs(left + (start + degree_right) / 2 - x)
+            if start == 0 or degree_right == mask.shape[1] or center_error > card_width * .18:
+                continue
+            value = int("".join(decoded[j:k])) * (-1 if signed else 1)
+            if -180 <= value <= 180:
+                hits.append((center_error, value))
+        hits.sort()
+        if len(hits) > 1 and hits[0][1] != hits[1][1] and hits[1][0] - hits[0][0] < card_width * .08:
+            return []
+        return [value for _, value in hits[:1]]
+
+    # Multiple masks retain pale digits and antialiased JPEG strokes.
+    colored = [v for threshold, saturation in ((125, 42), (155, 65), (100, 30))
+               for v in read_mask((bright >= threshold) & (chroma >= saturation))]
+    if colored:
+        return colored[0] if len(set(colored)) == 1 else None
+    luminance = np.asarray(Image.fromarray(rgb).convert("L"))
+    background, foreground = np.percentile(luminance, (50, 99.5))
+    if foreground - background < 26:
+        return None
+    contrast = [v for fraction in (.43, .55, .68)
+                for v in read_mask(luminance >= background + fraction * (foreground - background))]
+    return contrast[0] if len(contrast) >= 2 and len(set(contrast)) == 1 else None
+
+
+def _read_shifted_sportsbox_layout(image, values):
+    image = image.resize(SPORTSBOX_REFERENCE_SIZE, SPORTSBOX_RESAMPLE)
+    white = _sportsbox_white_mask(image)
+    glyphs = SPORTSBOX_GLYPH_TEMPLATES
+    for metric, (number_top, cards, title_y) in SPORTSBOX_ROWS.items():
+        if all(metric in row for row in values.values()):
+            continue
+        boxes = SPORTSBOX_BADGES[metric]
+        anchors = {}
+        for code, badge, box in zip(SPORTSBOX_POSITIONS, ("Address", "TOP", "DAH"), boxes):
+            matches = _sportsbox_word_matches(white, box, glyphs[metric + "_" + badge], (185, 125))
+            if matches:
+                _, x, y = matches[0]
+                anchors[code] = (x, y, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+        # Estimate card spacing from label pairs where the order and spacing agree.
+        ordered = list(anchors.values())
+        scales = [(bx - ax) / (br - ar)
+                  for i, (ax, ay, ar, _) in enumerate(ordered)
+                  for bx, by, br, _ in ordered[i + 1:] if abs(ay - by) < 32]
+        scale_x = float(np.median([s for s in scales if .72 <= s <= 1.32] or [1.]))
+        for code, (left, right) in zip(SPORTSBOX_POSITIONS, cards):
+            if metric in values[code] or code not in anchors:
+                continue
+            x, y, ref_x, ref_y = anchors[code]
+            tx = x + (left + 6 - ref_x) * scale_x
+            ty = y + title_y - ref_y
+            title_box = (round(tx), round(ty), round(tx + 139 * scale_x), round(ty + 29))
+            matches = _sportsbox_word_matches(white, title_box, [glyphs[metric]], (55, 43))
+            if not matches:
+                continue
+            _, title_x, title_center = matches[0]
+            # The title confirms Chest/Pelvis, while the badge anchors the horizontal card.
+            number_x = x + ((left + right) / 2 - ref_x) * scale_x
+            number_y = title_center + number_top - title_y - 14.5
+            if abs(title_x - (tx + 69.5 * scale_x)) > 58:
+                continue
+            value = _sportsbox_read_shifted_number(image, number_x, number_y, (right - left) * scale_x)
+            if value is not None:
+                values[code][metric] = value
+    return values
+
+
 def read_sportsbox_angles(data):
     """Return detected values, leaving unconfirmed cells empty."""
     with Image.open(io.BytesIO(data)) as source:
@@ -1063,18 +1229,18 @@ def read_sportsbox_angles(data):
             raise ValueError("画像が大きすぎます。横長のTurn画面のスクリーンショットを選び直してください。")
         image = ImageOps.exif_transpose(source).convert("RGB")
 
-    width, height = image.size
-    aspect = SPORTSBOX_REFERENCE_SIZE[0] / SPORTSBOX_REFERENCE_SIZE[1]
-    if min(width, height) < 400:
+    if min(image.size) < 240:
         raise ValueError("画像が小さすぎます。縮小する前のスクリーンショットを選び直してください。")
-    if abs(width / height - aspect) <= .06:
-        return _read_sportsbox_layout(image)
-    if abs(height / width - aspect) <= .06:
-        # Some phones save a landscape capture as a sideways portrait image.
-        candidates = (_read_sportsbox_layout(image.transpose(turn))
-                      for turn in (Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_270))
-        return max(candidates, key=lambda values: sum(map(len, values.values())))
-    raise ValueError("画像は見本と同じ横長のTurn画面にしてください。Chest TurnとPelvis Turnの両方が入る状態で撮影してください。")
+    candidates = [image] if image.width >= image.height else [
+        image.transpose(turn) for turn in (Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_270)
+    ]
+    results = []
+    for candidate in candidates:
+        values = {code: {} for code in SPORTSBOX_POSITIONS}
+        if abs(candidate.width / candidate.height - SPORTSBOX_REFERENCE_SIZE[0] / SPORTSBOX_REFERENCE_SIZE[1]) <= .06:
+            values = _read_sportsbox_layout(candidate)
+        results.append(_read_shifted_sportsbox_layout(candidate, values))
+    return max(results, key=lambda values: sum(map(len, values.values())))
 
 
 def _read_sportsbox_layout(image):
@@ -1128,7 +1294,7 @@ def sportsbox_settings(job: dict) -> None:
             "同じスイングのSportsbox画像を選択",
             type=["png", "jpg", "jpeg", "webp"],
             key=f"sportsbox_file_{token}", on_change=clear_sportsbox_image,
-            help="見本と同じ横長のTurn画面を使用してください。DAHの次のカードをIMPACTとして読み取ります。",
+            help="Chest Turn・Pelvis Turnの行と、Address・TOP・DAHのラベルが見える画像を使用してください。",
         )
     else:
         screenshot = None
@@ -1137,7 +1303,7 @@ def sportsbox_settings(job: dict) -> None:
     if method == "手入力":
         source_id = "manual"
     elif screenshot is not None:
-        source_id = screenshot.file_id
+        source_id = f"{screenshot.file_id}:turn-v2"
         st.caption(f"画像を受信しました　{screenshot.name}")
     elif state and state.get("method") == method:
         source_id = state["id"]
@@ -1149,17 +1315,24 @@ def sportsbox_settings(job: dict) -> None:
         clear_outputs()
         error = None
         values = {}
+        read_count = 0
         if screenshot is not None:
             with st.spinner("Sportsbox画像から回転角を読み取っています…"):
                 try:
                     values = read_sportsbox_angles(screenshot.getbuffer())
+                    read_count = sum(map(len, values.values()))
                 except ValueError as exc:
                     error = str(exc)
                 except (OSError, Image.DecompressionBombError):
                     error = "画像を開けませんでした。端末のスクリーンショットをPNGまたはJPEGで選び直してください。"
+        if screenshot is not None and state and state["id"] == screenshot.file_id:
+            for code, metrics in state["values"].items():
+                for metric, value in metrics.items():
+                    if value is not None:
+                        values.setdefault(code, {})[metric] = value
         state = {
             "id": source_id, "method": method, "name": screenshot.name if screenshot is not None else "",
-            "values": values, "error": error, "read_count": sum(map(len, values.values())),
+            "values": values, "error": error, "read_count": read_count,
         }
         job["sportsbox_import"] = state
 
@@ -1170,7 +1343,7 @@ def sportsbox_settings(job: dict) -> None:
         if count:
             st.caption(f"画像から読み取った値　{count} / 6")
         else:
-            st.warning("画像は受信できましたが、回転角を読み取れませんでした。見本と同じTurn画面を選ぶか、下の欄に入力してください。")
+            st.warning("画像は受信できましたが、回転角を読み取れませんでした。Chest Turn・Pelvis Turnの行とポジションのラベルが入る画像を選ぶか、下の欄に入力してください。")
     st.caption("画像と数値を照合し、必要に応じて修正してください。両方の角度がそろったポジションに表示します。")
     values = {}
     for col, (code, position) in zip(st.columns(3), SPORTSBOX_POSITIONS.items()):
