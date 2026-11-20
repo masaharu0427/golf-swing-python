@@ -452,12 +452,22 @@ def pil_font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def sportsbox_overlay(job: dict, phase: str) -> list[list[str]]:
+def sway_value_color(code: str, value: float) -> str:
+    if code == "BS_MAX":
+        in_range = abs(value) <= 1.4
+    elif code == "SLIDE":
+        in_range = .6 <= value <= 1.84
+    else:  # Sway at TOP or IMPACT.
+        in_range = -1.0 <= value <= 1.07
+    return "#32D685" if in_range else "#FF625D"
+
+
+def sportsbox_overlay(job: dict, phase: str) -> list[list[tuple[str, str, str]]]:
     panels = []
     angles = job.get("sportsbox_angles", {}).get(phase, {})
     if job.get("sportsbox_show_turn", True) and all(angles.get(metric) is not None for metric in SPORTSBOX_METRICS):
         values = "   ".join(f"{name} {angles[metric]}°" for metric, name in SPORTSBOX_METRICS.items())
-        panels.append([f"回転角度   {values}"])
+        panels.append([(f"回転角度   {values}", "", "")])
     if not job.get("sportsbox_show_sway", True):
         return panels
     sway = job.get("sportsbox_sway", {})
@@ -467,18 +477,17 @@ def sportsbox_overlay(job: dict, phase: str) -> list[list[str]]:
     }
     lines = []
     for code, label in sway_rows.get(phase, ()):
-        row = sway.get(code, {})
-        values = [f"{name} {row[metric]:.2f}".rstrip("0").rstrip(".") + "″"
-                  for metric, name in SPORTSBOX_SWAY_METRICS.items() if row.get(metric) is not None]
-        if values:
-            lines.append(label + "   " + "   ".join(values))
+        value = sway.get(code, {}).get("pelvis")
+        if value is not None:
+            number = f"{value:.2f}".rstrip("0").rstrip(".") + "″"
+            lines.append((f"{label}   骨盤 ", number, sway_value_color(code, value)))
     if lines:
         panels.append(lines)
     return panels
 
 
 def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
-                     sportsbox: list[list[str]] | None = None) -> np.ndarray:
+                     sportsbox: list[list[tuple[str, str, str]]] | None = None) -> np.ndarray:
     im = Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(im)
     w,h = im.size
@@ -532,8 +541,8 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
         pad = max(4, round(size * .35))
         top = margin
         for lines in sportsbox:
-            boxes = [draw.textbbox((0, 0), line, font=font, anchor="rt", stroke_width=stroke)
-                     for line in lines]
+            boxes = [draw.textbbox((0, 0), prefix + number, font=font, anchor="rs", stroke_width=stroke)
+                     for prefix, number, _ in lines]
             x = w - margin - pad - max(box[2] for box in boxes)
             line_height = max(box[3] - box[1] for box in boxes)
             step = line_height + stroke + 2
@@ -542,9 +551,14 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
                 (x + min(box[0] for box in boxes) - pad, top, w - margin, bottom),
                 fill=(0, 0, 0, 166),
             )
-            for i, (line, box) in enumerate(zip(lines, boxes)):
-                draw.text((x, top + pad + i * step - box[1]), line, font=font, fill="white",
-                          anchor="rt", stroke_width=stroke, stroke_fill="black")
+            for i, ((prefix, number, color), box) in enumerate(zip(lines, boxes)):
+                y = top + pad + i * step - box[1]
+                prefix_x = x - draw.textlength(number, font=font)
+                draw.text((prefix_x, y), prefix, font=font, fill="white",
+                          anchor="rs", stroke_width=stroke, stroke_fill="black")
+                if number:
+                    draw.text((x, y), number, font=font, fill=color,
+                              anchor="rs", stroke_width=stroke, stroke_fill="black")
             top = bottom + pad + 1
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
@@ -746,7 +760,7 @@ function drawSportsbox(panels){
     ctx.strokeStyle='#000';
     let top=margin;
     for(const lines of panels){
-        const metrics=lines.map(line=>ctx.measureText(line));
+        const metrics=lines.map(([prefix,number])=>ctx.measureText(prefix+number));
         const ascent=Math.max(...metrics.map(m=>m.actualBoundingBoxAscent));
         const descent=Math.max(...metrics.map(m=>m.actualBoundingBoxDescent));
         const step=ascent+descent+2*stroke+2;
@@ -756,8 +770,18 @@ function drawSportsbox(panels){
         const bottom=y+descent+stroke+pad+(lines.length-1)*step;
         ctx.fillStyle='rgba(0,0,0,.65)';
         ctx.fillRect(left,top,canvas.width-margin-left,bottom-top);
-        ctx.fillStyle='#fff';
-        lines.forEach((line,i)=>{ctx.strokeText(line,x,y+i*step);ctx.fillText(line,x,y+i*step);});
+        lines.forEach(([prefix,number,color],i)=>{
+            const baseline=y+i*step;
+            const prefixX=x-ctx.measureText(number).width;
+            ctx.fillStyle='#fff';
+            ctx.strokeText(prefix,prefixX,baseline);
+            ctx.fillText(prefix,prefixX,baseline);
+            if(number){
+                ctx.fillStyle=color;
+                ctx.strokeText(number,x,baseline);
+                ctx.fillText(number,x,baseline);
+            }
+        });
         top=bottom+pad+1;
     }
     ctx.restore();
