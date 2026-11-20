@@ -463,10 +463,11 @@ def sportsbox_overlay(job: dict, phase: str) -> list[list[list[tuple[str, str]]]
     ranges = SPORTSBOX_IRON_RANGES.get(profile, SPORTSBOX_IRON_RANGES["male"])
     angles = job.get("sportsbox_angles", {}).get(phase, {})
     if job.get("sportsbox_show_turn", True) and all(angles.get(metric) is not None for metric in SPORTSBOX_METRICS):
+        turn_ranges = ranges["turn"].get(phase)
         turn_line = [("回転角度", "white")]
         for metric, name in SPORTSBOX_METRICS.items():
             value = angles[metric]
-            color = sportsbox_value_color(value, ranges["turn_top"][metric]) if phase == "P4" else "white"
+            color = sportsbox_value_color(value, turn_ranges[metric]) if turn_ranges else "white"
             turn_line.extend([(f"   {name} ", "white"), (f"{value}°", color)])
         panels.append([turn_line])
     if not job.get("sportsbox_show_sway", True):
@@ -967,11 +968,17 @@ SPORTSBOX_SWAY_METRICS = {"pelvis": SPORTSBOX_METRICS["pelvis"]}
 SPORTSBOX_IRON_LABELS = {"male": "男性アイアン", "female": "女性アイアン"}
 SPORTSBOX_IRON_RANGES = {
     "male": {
-        "turn_top": {"pelvis": (-41, -30), "chest": (-98, -88)},
+        "turn": {
+            "P4": {"pelvis": (-41, -30), "chest": (-98, -88)},
+            "P7": {"pelvis": (28, 40), "chest": (22, 28)},
+        },
         "sway": {"P4": (-1.0, 1.07), "P7": (3.7, 5.9), "BS_MAX": (-1.4, 1.4), "SLIDE": (.6, 1.84)},
     },
     "female": {
-        "turn_top": {"pelvis": (-45, -28), "chest": (-102, -90)},
+        "turn": {
+            "P4": {"pelvis": (-45, -28), "chest": (-102, -90)},
+            "P7": {"pelvis": (32, 42), "chest": (23, 31)},
+        },
         "sway": {"P4": (-.9, .5), "P7": (2.7, 4.7), "BS_MAX": (-.7, .7), "SLIDE": (.5, 1.5)},
     },
 }
