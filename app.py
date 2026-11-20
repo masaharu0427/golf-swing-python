@@ -576,24 +576,65 @@ def export_video(job: dict, cfg: dict, pauses: list, pause_seconds: float, custo
         raw.unlink(missing_ok=True)
 
 
+def white_frame_margins(frame: np.ndarray) -> tuple[int, int, int, int]:
+    # Only trim a thin, nearly solid white border present on all four sides.
+    # A bright wall or sky along one edge is part of the shot.
+    white = np.all(frame >= 240, axis=2)
+    rows = white.mean(axis=1) >= .995
+    cols = white.mean(axis=0) >= .995
+    top, bottom, left, right = (
+        int(np.argmax(~edge)) for edge in (rows, rows[::-1], cols, cols[::-1])
+    )
+    if (0 < min(top, bottom, left, right)
+            and max(top, bottom) <= frame.shape[0] * .08
+            and max(left, right) <= frame.shape[1] * .08):
+        return top, bottom, left, right
+    return 0, 0, 0, 0
+
+
 def export_images(job: dict,cfg: dict,codes: list,custom_positions: list) -> dict:
     if not codes: raise ValueError("切り出すポジションを1つ以上選んでください。")
-    images=[];zip_data=io.BytesIO()
-    with zipfile.ZipFile(zip_data,"w",zipfile.ZIP_DEFLATED) as zf:
-        for code in codes:
-            i=job["p_frames"][code]
-            annotated=draw_annotations(read_frame(job["path"],i),primitives_for(job,i,cfg,code,custom_positions),code,sportsbox_overlay(job,code))
-            ok,png=cv2.imencode(".png",annotated)
-            if not ok:raise RuntimeError("静止画を作成できませんでした。")
-            data=png.tobytes();images.append((code,data,annotated));zf.writestr(code+".png",data)
-        cols=min(5,len(images));rows=math.ceil(len(images)/cols)
-        # 連続写真は長辺480pxの各コマで作成し、大量の4K画像を展開しない。
-        h,w=images[0][2].shape[:2];scale=min(1.,480/max(h,w));cw,ch=max(1,round(w*scale)),max(1,round(h*scale));gap=10
-        sheet=np.full((rows*(ch+gap)+gap,cols*(cw+gap)+gap,3),245,dtype=np.uint8)
-        for k,(_,_,im) in enumerate(images):
-            x=gap+(k%cols)*(cw+gap);y=gap+(k//cols)*(ch+gap);sheet[y:y+ch,x:x+cw]=cv2.resize(im,(cw,ch))
-        _,buf=cv2.imencode(".png",sheet);sheet_data=buf.tobytes();zf.writestr("sequence.png",sheet_data)
-    return {"zip":zip_data.getvalue(),"sheet":sheet_data,"images":[(code,data) for code,data,_ in images]}
+    annotated_frames = []
+    margins = []
+    for code in codes:
+        index = job["p_frames"][code]
+        frame = read_frame(job["path"], index)
+        margins.append(white_frame_margins(frame))
+        annotated_frames.append(draw_annotations(
+            frame, primitives_for(job, index, cfg, code, custom_positions),
+            code, sportsbox_overlay(job, code),
+        ))
+
+    # Use the same crop on every frame so the reference lines still align.
+    top, bottom, left, right = (min(edge) for edge in zip(*margins))
+    h, w = annotated_frames[0].shape[:2]
+    scale = min(1., 480 / max(h - top - bottom, w - left - right))
+    cw = max(1, round((w - left - right) * scale))
+    ch = max(1, round((h - top - bottom) * scale))
+    cols = min(5, len(codes))
+    rows = math.ceil(len(codes) / cols)
+    sheet = np.zeros((rows * ch, cols * cw, 4), dtype=np.uint8)
+    images = []
+    zip_data = io.BytesIO()
+    with zipfile.ZipFile(zip_data, "w", zipfile.ZIP_DEFLATED) as zf:
+        for k, (code, annotated) in enumerate(zip(codes, annotated_frames)):
+            cropped = annotated[top:h - bottom, left:w - right]
+            ok, png = cv2.imencode(".png", cropped)
+            if not ok:
+                raise RuntimeError("静止画を作成できませんでした。")
+            data = png.tobytes()
+            images.append((code, data))
+            zf.writestr(code + ".png", data)
+            x = k % cols * cw
+            y = k // cols * ch
+            sheet[y:y + ch, x:x + cw, :3] = cv2.resize(cropped, (cw, ch))
+            sheet[y:y + ch, x:x + cw, 3] = 255
+        ok, png = cv2.imencode(".png", sheet)
+        if not ok:
+            raise RuntimeError("連続写真を作成できませんでした。")
+        sheet_data = png.tobytes()
+        zf.writestr("sequence.png", sheet_data)
+    return {"zip": zip_data.getvalue(), "sheet": sheet_data, "images": images}
 
 
 def valid_point(value):
