@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unicodedata
 import urllib.request
 import uuid
 import zipfile
@@ -1365,6 +1366,26 @@ def sportsbox_settings(job: dict) -> None:
         sportsbox_data_inputs(job, sway=True)
 
 
+def parse_sportsbox_input(raw: str, sway: bool) -> int | float | None:
+    number = unicodedata.normalize("NFKC", raw).strip().replace("−", "-")
+    if not number:
+        return None
+    if sway:
+        number = re.sub(r"""\s*(?:"|′′|'')$""", "", number)
+        pattern = r"[+-]?(?:[0-9]+(?:\.[0-9]{1,2})?|\.[0-9]{1,2})"
+        limit = 100
+    else:
+        number = re.sub(r"\s*°$", "", number)
+        pattern = r"[+-]?[0-9]+"
+        limit = 180
+    if len(number) > 12 or not re.fullmatch(pattern, number):
+        raise ValueError("数値の書式を確認してください。")
+    value = float(number) if sway else int(number)
+    if abs(value) > limit:
+        raise ValueError(f"−{limit}〜{limit}の範囲で入力してください。")
+    return value
+
+
 def sportsbox_data_inputs(job: dict, sway: bool) -> None:
     token = job["token"]
     prefix = "sportsbox_sway" if sway else "sportsbox"
@@ -1372,7 +1393,7 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
     output_key = "sportsbox_sway" if sway else "sportsbox_angles"
     category = "Sway" if sway else "Turn"
     field = "Sway（″）" if sway else "回転角（°）"
-    limit, step, fmt = (100., .1, "%.2f") if sway else (180, 1, "%d")
+    example = "-2.1" if sway else "-89"
     user_agent = st.context.headers.get("User-Agent", "")
     default_mobile = bool(re.search(r"Android|iPhone|iPad|iPod|Mobile", user_agent, re.I))
     methods = ("通常", "スマホ向け（分割送信）", "手入力")
@@ -1407,7 +1428,7 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
     source_files = sorted({image.file_id for image in screenshots})
     names = "、".join(image.name for image in screenshots)
     if method == "手入力":
-        source_id = "manual"
+        source_id = state["id"] if state else "manual"
     elif screenshots:
         if sway:
             digest = hashlib.sha256(json.dumps(source_files).encode()).hexdigest()[:24]
@@ -1415,11 +1436,12 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
         else:
             source_id = f"{source_files[0]}:turn-v2"
         st.caption(f"画像を受信しました　{names}")
-    elif state and state.get("method") == method:
+    elif state:
         source_id = state["id"]
-        st.caption(f"保存された読み取り結果　{state.get('name', '')}")
+        if source_id != "manual":
+            st.caption(f"保存された読み取り結果　{state.get('name', '')}")
     else:
-        return
+        source_id = "manual"
 
     if state is None or state["id"] != source_id:
         clear_outputs()
@@ -1453,7 +1475,7 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
 
     if state["error"]:
         st.warning(state["error"])
-    if method != "手入力":
+    if method != "手入力" and source_id != "manual":
         count = state["read_count"]
         if count:
             st.caption(f"画像から読み取った値　{count} / 6")
@@ -1463,22 +1485,28 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
         if conflicts:
             labels = "、".join(f"{code} {SPORTSBOX_METRICS[metric]}" for code, metric in conflicts)
             st.warning(f"画像間で値が異なる項目があります。元画像を照合して入力してください。対象は {labels} です。")
-    st.caption("元の画像と数値を照合し、必要に応じて修正してください。")
+    st.caption("空欄にも直接入力できます。入力後はEnterを押すか、欄の外をタップしてください。")
     values = {}
     for col, (code, position) in zip(st.columns(3), SPORTSBOX_POSITIONS.items()):
         col.markdown(f"**{code} · {position}**")
         values[code] = {}
         for metric, name in SPORTSBOX_METRICS.items():
             value = state["values"].get(code, {}).get(metric)
-            values[code][metric] = col.number_input(
-                f"{name}の{field}", min_value=-limit, max_value=limit,
-                value=float(value) if sway and value is not None else value, step=step, format=fmt,
-                placeholder="未読取",
-                key=f"{prefix}_{token}_{source_id}_{code}_{metric}", on_change=clear_outputs,
+            key = f"{prefix}_text_{token}_{source_id}_{code}_{metric}"
+            if key not in st.session_state:
+                st.session_state[key] = "" if value is None else str(value)
+            raw = col.text_input(
+                f"{name}の{field}", placeholder=f"例 {example}", max_chars=16,
+                key=key, on_change=clear_outputs,
             )
+            try:
+                values[code][metric] = parse_sportsbox_input(raw, sway)
+            except ValueError as exc:
+                values[code][metric] = None
+                col.caption(f"{name}の入力を確認してください。{exc} 入力例 {example}")
     state["values"] = values
     job[output_key] = values
-    if any(value is None for pair in values.values() for value in pair.values()):
+    if source_id != "manual" and any(value is None for pair in values.values() for value in pair.values()):
         st.info("読み取れなかった値は空欄です。画像を見ながら入力できます。")
 
 
