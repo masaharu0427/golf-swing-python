@@ -462,7 +462,7 @@ def sportsbox_overlay(job: dict, phase: str) -> list[list[str]]:
         return panels
     sway = job.get("sportsbox_sway", {})
     sway_rows = {
-        "P4": (("P4", "Sway"), ("BS_MAX", "バックスイングMAX"), ("SLIDE", "切り替えスライド")),
+        "P4": (("P4", "Sway"), ("BS_MAX", "Max"), ("SLIDE", "スライド")),
         "P7": (("P7", "Sway"),),
     }
     lines = []
@@ -934,9 +934,9 @@ def refresh_pose_points(job: dict, keys: tuple, progress) -> int:
 # Sportsbox Turn screenshot recognition.
 SPORTSBOX_POSITIONS = {"P1": "Address", "P4": "TOP", "P7": "IMPACT"}
 SPORTSBOX_SWAY_POSITIONS = {
-    "BS_MAX": "バックスイングMAX",
+    "BS_MAX": "Max",
     "P4": "P4 · TOP",
-    "SLIDE": "スライド（切り替え）",
+    "SLIDE": "スライド",
     "P7": "P7 · IMPACT",
 }
 SPORTSBOX_METRICS = {"chest": "胸", "pelvis": "骨盤"}
@@ -1591,7 +1591,7 @@ def sportsbox_data_inputs(job: dict, sway: bool) -> None:
             st.warning(f"画像間で値が異なる項目があります。元画像を照合して入力してください。対象は {labels} です。")
     st.caption("空欄にも直接入力できます。入力後はEnterを押すか、欄の外をタップしてください。")
     if sway:
-        st.caption("MAXとスライドも画像から読み取ります。スライドが空欄の場合は、TOP − MAXで計算します。")
+        st.caption("Maxとスライドも画像から読み取ります。スライドが空欄の場合は、TOP − Maxで計算します。")
     values = {}
     slide = {}
     for col, (code, position) in zip(st.columns(len(positions)), positions.items()):
