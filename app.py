@@ -452,27 +452,33 @@ def pil_font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def sportsbox_overlay(job: dict, phase: str) -> str | None:
-    lines = []
+def sportsbox_overlay(job: dict, phase: str) -> list[list[str]]:
+    panels = []
     angles = job.get("sportsbox_angles", {}).get(phase, {})
-    if all(angles.get(metric) is not None for metric in SPORTSBOX_METRICS):
+    if job.get("sportsbox_show_turn", True) and all(angles.get(metric) is not None for metric in SPORTSBOX_METRICS):
         values = "   ".join(f"{name} {angles[metric]}°" for metric, name in SPORTSBOX_METRICS.items())
-        lines.append(f"回転角度   {values}")
+        panels.append([f"回転角度   {values}"])
+    if not job.get("sportsbox_show_sway", True):
+        return panels
     sway = job.get("sportsbox_sway", {})
     sway_rows = {
         "P4": (("P4", "Sway"), ("BS_MAX", "バックスイングMAX"), ("SLIDE", "切り替えスライド")),
         "P7": (("P7", "Sway"),),
     }
+    lines = []
     for code, label in sway_rows.get(phase, ()):
         row = sway.get(code, {})
         values = [f"{name} {row[metric]:.2f}".rstrip("0").rstrip(".") + "″"
                   for metric, name in SPORTSBOX_METRICS.items() if row.get(metric) is not None]
         if values:
             lines.append(label + "   " + "   ".join(values))
-    return "\n".join(lines) or None
+    if lines:
+        panels.append(lines)
+    return panels
 
 
-def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None, sportsbox: str | None = None) -> np.ndarray:
+def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
+                     sportsbox: list[list[str]] | None = None) -> np.ndarray:
     im = Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(im)
     w,h = im.size
@@ -524,19 +530,22 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None, 
         stroke = max(1, round(size * .1))
         margin = max(6, round(size * .65))
         pad = max(4, round(size * .35))
-        lines = sportsbox.splitlines()
-        boxes = [draw.textbbox((0, 0), line, font=font, anchor="rt", stroke_width=stroke) for line in lines]
-        x = w - margin - pad - max(box[2] for box in boxes)
-        line_height = max(box[3] - box[1] for box in boxes)
-        step = line_height + stroke + 2
-        ImageDraw.Draw(im, "RGBA").rectangle(
-            (x + min(box[0] for box in boxes) - pad, margin, w - margin,
-             margin + 2 * pad + line_height + (len(lines) - 1) * step),
-            fill=(0, 0, 0, 166),
-        )
-        for i, (line, box) in enumerate(zip(lines, boxes)):
-            draw.text((x, margin + pad + i * step - box[1]), line, font=font, fill="white",
-                      anchor="rt", stroke_width=stroke, stroke_fill="black")
+        top = margin
+        for lines in sportsbox:
+            boxes = [draw.textbbox((0, 0), line, font=font, anchor="rt", stroke_width=stroke)
+                     for line in lines]
+            x = w - margin - pad - max(box[2] for box in boxes)
+            line_height = max(box[3] - box[1] for box in boxes)
+            step = line_height + stroke + 2
+            bottom = top + 2 * pad + line_height + (len(lines) - 1) * step
+            ImageDraw.Draw(im, "RGBA").rectangle(
+                (x + min(box[0] for box in boxes) - pad, top, w - margin, bottom),
+                fill=(0, 0, 0, 166),
+            )
+            for i, (line, box) in enumerate(zip(lines, boxes)):
+                draw.text((x, top + pad + i * step - box[1]), line, font=font, fill="white",
+                          anchor="rt", stroke_width=stroke, stroke_fill="black")
+            top = bottom + pad + 1
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
 
@@ -722,9 +731,8 @@ function handles(){const out=[],shown=id=>args.primitives.some(s=>s.id===id);con
 if(args.active_line==='head'&&shown('head_reference')&&g.head){add(g.head,'head');add([g.head[0]+g.radius,g.head[1]],'radius');}if(args.active_line==='vertical'&&shown('vertical'))add([g.vertical,(g.top+g.bottom)/2],'vertical');if(args.active_line==='back_vertical'&&shown('back_vertical')){const s=args.primitives.find(p=>p.id==='back_vertical');add([g.back_vertical,(s.a[1]+s.b[1])/2],'back_vertical');}if(args.active_line==='ankles'&&shown('ankles'))g.ankles.forEach((x,i)=>add([x,(g.top+g.bottom)/2],'ankles',i));
 if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)){add(body.sh,'body','sh');add(body.hip,'body','hip');}if(args.active_line==='shoulders'&&shown('shoulders')){add(body.ls,'body','ls');add(body.rs,'body','rs');}if(args.active_line==='hip_right_knee'&&shown('hip_right_knee')){add(body.hip,'body','hip');add(body.rk,'body','rk');}if(args.phase==='P1'&&args.active_line==='right_leg_outer'&&shown('right_leg_outer')){add(body.right_ankle_outer,'body','right_ankle_outer');add(body.right_thigh_outer,'body','right_thigh_outer');}}
 shapes.forEach((s,i)=>{if(!visible(s))return;if(s.type==='line'){add(s.a,'custom',i,{end:'a'});add(s.b,'custom',i,{end:'b'});}if(s.type==='circle'){add(s.center,'custom',i,{end:'center'});add([s.center[0]+s.radius,s.center[1]],'custom',i,{end:'radius'});}if(s.type==='free'&&s.points.length)add(s.points[0],'custom',i,{end:'free'});});return out;}
-function drawSportsbox(label){
-    if(!label)return;
-    const lines=label.split('\n');
+function drawSportsbox(panels){
+    if(!panels?.length)return;
     const size=Math.max(8,Math.min(Math.max(15,Math.round(canvas.height*.028)),Math.floor(canvas.width/17)));
     const margin=Math.max(6,Math.round(size*.65));
     const pad=Math.max(4,Math.round(size*.35)),stroke=Math.max(1,Math.round(size*.1));
@@ -732,22 +740,26 @@ function drawSportsbox(label){
     ctx.font=`bold ${size}px "Yu Gothic", Meiryo, sans-serif`;
     ctx.textAlign='right';
     ctx.textBaseline='alphabetic';
-    const metrics=lines.map(line=>ctx.measureText(line));
-    const ascent=Math.max(...metrics.map(m=>m.actualBoundingBoxAscent));
-    const descent=Math.max(...metrics.map(m=>m.actualBoundingBoxDescent));
-    const step=ascent+descent+2*stroke+2;
-    const x=canvas.width-margin-pad-stroke-Math.max(...metrics.map(m=>m.actualBoundingBoxRight));
-    const y=margin+pad+stroke+ascent;
-    const left=x-Math.max(...metrics.map(m=>m.actualBoundingBoxLeft))-stroke-pad;
-    const bottom=y+descent+stroke+pad+(lines.length-1)*step;
-    ctx.fillStyle='rgba(0,0,0,.65)';
-    ctx.fillRect(left,margin,canvas.width-margin-left,bottom-margin);
     ctx.setLineDash([]);
     ctx.lineJoin='round';
     ctx.lineWidth=2*stroke;
     ctx.strokeStyle='#000';
-    ctx.fillStyle='#fff';
-    lines.forEach((line,i)=>{ctx.strokeText(line,x,y+i*step);ctx.fillText(line,x,y+i*step);});
+    let top=margin;
+    for(const lines of panels){
+        const metrics=lines.map(line=>ctx.measureText(line));
+        const ascent=Math.max(...metrics.map(m=>m.actualBoundingBoxAscent));
+        const descent=Math.max(...metrics.map(m=>m.actualBoundingBoxDescent));
+        const step=ascent+descent+2*stroke+2;
+        const x=canvas.width-margin-pad-stroke-Math.max(...metrics.map(m=>m.actualBoundingBoxRight));
+        const y=top+pad+stroke+ascent;
+        const left=x-Math.max(...metrics.map(m=>m.actualBoundingBoxLeft))-stroke-pad;
+        const bottom=y+descent+stroke+pad+(lines.length-1)*step;
+        ctx.fillStyle='rgba(0,0,0,.65)';
+        ctx.fillRect(left,top,canvas.width-margin-left,bottom-top);
+        ctx.fillStyle='#fff';
+        lines.forEach((line,i)=>{ctx.strokeText(line,x,y+i*step);ctx.fillText(line,x,y+i*step);});
+        top=bottom+pad+1;
+    }
     ctx.restore();
 }
 function render(){if(!args||!img.complete||!img.naturalWidth)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);args.primitives.forEach(s=>draw(geometry(s)));shapes.filter(visible).forEach(draw);if(active)draw(active);if(tool==='move'){for(const h of handles()){ctx.save();ctx.setLineDash([]);ctx.fillStyle=h.color||'#e5f28b';ctx.strokeStyle='#163c30';ctx.lineWidth=2;ctx.beginPath();ctx.arc(h.p[0]*canvas.width,h.p[1]*canvas.height,Math.max(8,canvas.height*.012),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();if(h.label)text(h.label,[h.p[0]+.018,h.p[1]-.015],h.color);}}drawSportsbox(args.sportsbox);height();}
@@ -1430,6 +1442,12 @@ def sportsbox_settings(job: dict) -> None:
     if not st.checkbox("Sportsboxのデータを表示する（オプション）",
                        key=f"sportsbox_enabled_{token}", on_change=clear_outputs):
         return
+    display_options = (("sportsbox_show_turn", "回転角を表示"), ("sportsbox_show_sway", "Swayを表示"))
+    for column, (setting, label) in zip(st.columns(2), display_options):
+        widget = f"{setting}_{token}"
+        if widget not in st.session_state:
+            st.session_state[widget] = job.get(setting, True)
+        job[setting] = column.checkbox(label, key=widget, on_change=clear_outputs)
     turn_tab, sway_tab = st.tabs(["Turn（回転角）", "Sway（左右移動量）"])
     with turn_tab:
         sportsbox_data_inputs(job, sway=False)
@@ -1685,7 +1703,10 @@ def save_workspace() -> None:
     if not workspace_id or not job:
         return
     token = job["token"]
-    keys = WORKSPACE_SETTINGS | {f"sportsbox_enabled_{token}", f"sportsbox_method_{token}", f"sportsbox_sway_method_{token}"}
+    keys = WORKSPACE_SETTINGS | {
+        f"sportsbox_enabled_{token}", f"sportsbox_method_{token}", f"sportsbox_sway_method_{token}",
+        f"sportsbox_show_turn_{token}", f"sportsbox_show_sway_{token}",
+    }
     settings = {key: state[key] for key in keys if key in state}
     saved_job = {key: value for key, value in job.items()
                  if key not in {"sportsbox_upload", "sportsbox_sway_upload", "sportsbox_sway_upload_2", "output_images"}}
