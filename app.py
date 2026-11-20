@@ -452,11 +452,20 @@ def pil_font(size: int):
 
 
 def sportsbox_overlay(job: dict, phase: str) -> str | None:
-    values = job.get("sportsbox_angles", {}).get(phase, {})
-    if any(values.get(metric) is None for metric in SPORTSBOX_METRICS):
-        return None
-    angles = "   ".join(f"{name} {values[metric]}°" for metric, name in SPORTSBOX_METRICS.items())
-    return f"回転角度   {angles}"
+    lines = []
+    angles = job.get("sportsbox_angles", {}).get(phase, {})
+    if all(angles.get(metric) is not None for metric in SPORTSBOX_METRICS):
+        values = "   ".join(f"{name} {angles[metric]}°" for metric, name in SPORTSBOX_METRICS.items())
+        lines.append(f"回転角度   {values}")
+    sway = job.get("sportsbox_sway", {}).get(phase, {})
+    values = []
+    for metric, name in SPORTSBOX_METRICS.items():
+        if sway.get(metric) is not None:
+            number = f"{sway[metric]:.2f}".rstrip("0").rstrip(".")
+            values.append(f"{name} {number}″")
+    if values:
+        lines.append("Sway   " + "   ".join(values))
+    return "\n".join(lines) or None
 
 
 def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None, sportsbox: str | None = None) -> np.ndarray:
@@ -511,19 +520,19 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None, 
         stroke = max(1, round(size * .1))
         margin = max(6, round(size * .65))
         pad = max(4, round(size * .35))
-        left, top, right, bottom = draw.textbbox(
-            (0, 0), sportsbox, font=font, anchor="rt", stroke_width=stroke,
-        )
-        x = w - margin - pad - right
-        y = margin + pad - top
+        lines = sportsbox.splitlines()
+        boxes = [draw.textbbox((0, 0), line, font=font, anchor="rt", stroke_width=stroke) for line in lines]
+        x = w - margin - pad - max(box[2] for box in boxes)
+        line_height = max(box[3] - box[1] for box in boxes)
+        step = line_height + stroke + 2
         ImageDraw.Draw(im, "RGBA").rectangle(
-            (x + left - pad, margin, w - margin, y + bottom + pad),
+            (x + min(box[0] for box in boxes) - pad, margin, w - margin,
+             margin + 2 * pad + line_height + (len(lines) - 1) * step),
             fill=(0, 0, 0, 166),
         )
-        draw.text(
-            (x, y), sportsbox, font=font, fill="white",
-            anchor="rt", stroke_width=stroke, stroke_fill="black",
-        )
+        for i, (line, box) in enumerate(zip(lines, boxes)):
+            draw.text((x, margin + pad + i * step - box[1]), line, font=font, fill="white",
+                      anchor="rt", stroke_width=stroke, stroke_fill="black")
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
 
@@ -711,6 +720,7 @@ if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)
 shapes.forEach((s,i)=>{if(!visible(s))return;if(s.type==='line'){add(s.a,'custom',i,{end:'a'});add(s.b,'custom',i,{end:'b'});}if(s.type==='circle'){add(s.center,'custom',i,{end:'center'});add([s.center[0]+s.radius,s.center[1]],'custom',i,{end:'radius'});}if(s.type==='free'&&s.points.length)add(s.points[0],'custom',i,{end:'free'});});return out;}
 function drawSportsbox(label){
     if(!label)return;
+    const lines=label.split('\n');
     const size=Math.max(8,Math.min(Math.max(15,Math.round(canvas.height*.028)),Math.floor(canvas.width/17)));
     const margin=Math.max(6,Math.round(size*.65));
     const pad=Math.max(4,Math.round(size*.35)),stroke=Math.max(1,Math.round(size*.1));
@@ -718,11 +728,14 @@ function drawSportsbox(label){
     ctx.font=`bold ${size}px "Yu Gothic", Meiryo, sans-serif`;
     ctx.textAlign='right';
     ctx.textBaseline='alphabetic';
-    const metrics=ctx.measureText(label);
-    const x=canvas.width-margin-pad-stroke-metrics.actualBoundingBoxRight;
-    const y=margin+pad+stroke+metrics.actualBoundingBoxAscent;
-    const left=x-metrics.actualBoundingBoxLeft-stroke-pad;
-    const bottom=y+metrics.actualBoundingBoxDescent+stroke+pad;
+    const metrics=lines.map(line=>ctx.measureText(line));
+    const ascent=Math.max(...metrics.map(m=>m.actualBoundingBoxAscent));
+    const descent=Math.max(...metrics.map(m=>m.actualBoundingBoxDescent));
+    const step=ascent+descent+2*stroke+2;
+    const x=canvas.width-margin-pad-stroke-Math.max(...metrics.map(m=>m.actualBoundingBoxRight));
+    const y=margin+pad+stroke+ascent;
+    const left=x-Math.max(...metrics.map(m=>m.actualBoundingBoxLeft))-stroke-pad;
+    const bottom=y+descent+stroke+pad+(lines.length-1)*step;
     ctx.fillStyle='rgba(0,0,0,.65)';
     ctx.fillRect(left,margin,canvas.width-margin-left,bottom-margin);
     ctx.setLineDash([]);
@@ -730,8 +743,7 @@ function drawSportsbox(label){
     ctx.lineWidth=2*stroke;
     ctx.strokeStyle='#000';
     ctx.fillStyle='#fff';
-    ctx.strokeText(label,x,y);
-    ctx.fillText(label,x,y);
+    lines.forEach((line,i)=>{ctx.strokeText(line,x,y+i*step);ctx.fillText(line,x,y+i*step);});
     ctx.restore();
 }
 function render(){if(!args||!img.complete||!img.naturalWidth)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);args.primitives.forEach(s=>draw(geometry(s)));shapes.filter(visible).forEach(draw);if(active)draw(active);if(tool==='move'){for(const h of handles()){ctx.save();ctx.setLineDash([]);ctx.fillStyle=h.color||'#e5f28b';ctx.strokeStyle='#163c30';ctx.lineWidth=2;ctx.beginPath();ctx.arc(h.p[0]*canvas.width,h.p[1]*canvas.height,Math.max(8,canvas.height*.012),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();if(h.label)text(h.label,[h.p[0]+.018,h.p[1]-.015],h.color);}}drawSportsbox(args.sportsbox);height();}
@@ -973,6 +985,13 @@ SPORTSBOX_GLYPH_TEMPLATES = {'digits': {'0': ['03c01ff83ffc7ffe7c3e781ff00ff00ff
                 'ffc00fe0780fffe00fe0780ff1f00fe0780ff0f80ec0780ff07c0ee0780ff03c1ef0780ff03c1ef0780ff01c18787ffff03c38787ffff03c3978780ff03c3ff8780ff0787ffc780ff0f8fffc780ffff0f01c780fffe0e00c780fff81e00c780f']}
 
 
+# Metric titles sampled from the original Sportsbox screenshot.
+SPORTSBOX_SWAY_TITLES = {
+    "chest": "18000000030000003c40000607800000664000060cc00000c25870cf0c511311c07cf9e70c1937b1c06c89260789a4d3c044898603cba193c044f8e600cee7dac24480660c4eecce664489260cc6ecce7e44f9e307c445cc3c4470e3078447c4000000000000000c000000000000000c00000000000000080000000000000008",
+    "pelvis": "f002008007000000f80200000f8000008c0200000cc0000084e2448e0810272184f2649f0c132fb38d9a64900f1b20b2fd9a2498039b6192f9fa2c8e00cbc792c1823883084ccd9e8182388308ccc89c81f2189f0fcccf8c80f2188f078ccf8c004000040200000c000000000000000800000000000000080000000000000018",
+}
+
+
 def _sportsbox_color_mask(crop):
     rgb = np.asarray(crop)
     return (rgb.max(axis=2) > 140) & (np.ptp(rgb, axis=2) > 65)
@@ -1097,7 +1116,7 @@ def _sportsbox_word_matches(white, box, templates, search):
     return sorted(best)
 
 
-def _sportsbox_read_shifted_number(image, x, y, card_width):
+def _sportsbox_read_shifted_number(image, x, y, card_width, sway=False):
     left = max(0, round(x - card_width * .46))
     right = min(image.width, round(x + card_width * .46))
     top = max(0, round(y - 13))
@@ -1123,21 +1142,52 @@ def _sportsbox_read_shifted_number(image, x, y, card_width):
             decoded.append(digit if score <= .17 and scores[1][0] - score >= .03 else None)
 
         hits = []
-        for k, (degree_left, degree_right, gy, glyph) in enumerate(groups):
+        for k, (unit_left, unit_right, gy, glyph) in enumerate(groups):
             gh, gw = glyph.shape
-            if not 8 <= gh <= 29 or not .55 <= gw / gh <= 1.55 or not k:
+            if not 8 <= gh <= 29 or not k:
                 continue
+            if sway:
+                # Two strokes are often separate in the original PNG and joined after resizing.
+                if k + 1 < len(groups) and .28 <= gw / gh <= 1.1:
+                    next_left, next_right, next_y, next_glyph = groups[k + 1]
+                    nh, nw = next_glyph.shape
+                    if (0 <= next_left - unit_right <= 6 and abs(next_y - gy) <= 4
+                            and .70 <= nh / gh <= 1.30 and .28 <= nw / nh <= 1.1):
+                        unit_right = next_right
+                    else:
+                        continue
+                elif not 1.25 <= gw / gh <= 2.5:
+                    continue
+            elif not .55 <= gw / gh <= 1.55:
+                continue
+
             j = k
-            while j and decoded[j - 1] is not None and groups[j][0] - groups[j - 1][1] <= 17:
-                j -= 1
-            if not 1 <= k - j <= 3:
+            decimal = None
+            while j and groups[j][0] - groups[j - 1][1] <= 17:
+                if decoded[j - 1] is not None:
+                    j -= 1
+                    continue
+                _, _, dot_y, dot = groups[j - 1]
+                dh, dw = dot.shape
+                _, _, digit_y, digit = groups[k - 1]
+                if (sway and decimal is None and j < k and j >= 2 and decoded[j - 2] is not None
+                        and 3 <= dh <= 15 and .50 <= dw / dh <= 1.8
+                        and dot_y >= digit_y + .68 * digit.shape[0]):
+                    decimal = j - 1
+                    j -= 1
+                    continue
+                break
+            if not 1 <= k - j <= (5 if sway else 3):
+                continue
+            if decimal is not None and not 1 <= k - decimal - 1 <= 2:
                 continue
             first_digit = groups[j]
             digit_y, digit_h = first_digit[2], first_digit[3].shape[0]
             if abs(gy - digit_y) > .32 * digit_h or not .23 <= gh / digit_h <= .65:
                 continue
-            if any(abs(group[2] - digit_y) > .17 * digit_h or abs(group[3].shape[0] - digit_h) > .20 * digit_h
-                   for group in groups[j:k]):
+            if any(abs(groups[i][2] - digit_y) > .17 * digit_h
+                   or abs(groups[i][3].shape[0] - digit_h) > .20 * digit_h
+                   for i in range(j, k) if i != decimal):
                 continue
             signed = False
             start = first_digit[0]
@@ -1154,11 +1204,15 @@ def _sportsbox_read_shifted_number(image, x, y, card_width):
                           and sign[sh // 2].mean() >= .65 and sign[:, sw // 2].mean() >= .65):
                     continue
                 start = sign_left
-            center_error = abs(left + (start + degree_right) / 2 - x)
-            if start == 0 or degree_right == mask.shape[1] or center_error > card_width * .18:
+            center_error = abs(left + (start + unit_right) / 2 - x)
+            if start == 0 or unit_right == mask.shape[1] or center_error > card_width * .18:
                 continue
-            value = int("".join(decoded[j:k])) * (-1 if signed else 1)
-            if -180 <= value <= 180:
+            number = "".join("." if i == decimal else decoded[i] for i in range(j, k))
+            if sway and len(number) > 1 and number[0] == "0" and number[1].isdigit():
+                continue
+            value = (float(number) if sway else int(number)) * (-1 if signed else 1)
+            limit = 100 if sway else 180
+            if -limit <= value <= limit:
                 hits.append((center_error, value))
         hits.sort()
         if len(hits) > 1 and hits[0][1] != hits[1][1] and hits[1][0] - hits[0][0] < card_width * .08:
@@ -1168,28 +1222,32 @@ def _sportsbox_read_shifted_number(image, x, y, card_width):
     # Multiple masks retain pale digits and antialiased JPEG strokes.
     colored = [v for threshold, saturation in ((125, 42), (155, 65), (100, 30))
                for v in read_mask((bright >= threshold) & (chroma >= saturation))]
-    if colored:
+    if colored and not sway:
         return colored[0] if len(set(colored)) == 1 else None
     luminance = np.asarray(Image.fromarray(rgb).convert("L"))
     background, foreground = np.percentile(luminance, (50, 99.5))
-    if foreground - background < 26:
-        return None
-    contrast = [v for fraction in (.43, .55, .68)
-                for v in read_mask(luminance >= background + fraction * (foreground - background))]
-    return contrast[0] if len(contrast) >= 2 and len(set(contrast)) == 1 else None
+    contrast = []
+    if foreground - background >= 26:
+        contrast = [v for fraction in (.43, .55, .68)
+                    for v in read_mask(luminance >= background + fraction * (foreground - background))]
+    votes = colored + contrast
+    return votes[0] if len(votes) >= 2 and len(set(votes)) == 1 else None
 
 
-def _read_shifted_sportsbox_layout(image, values):
+def _read_shifted_sportsbox_layout(image, values, sway=False):
     image = image.resize(SPORTSBOX_REFERENCE_SIZE, SPORTSBOX_RESAMPLE)
     white = _sportsbox_white_mask(image)
     glyphs = SPORTSBOX_GLYPH_TEMPLATES
-    for metric, (number_top, cards, title_y) in SPORTSBOX_ROWS.items():
-        if all(metric in row for row in values.values()):
-            continue
-        boxes = SPORTSBOX_BADGES[metric]
+    titles = SPORTSBOX_SWAY_TITLES if sway else glyphs
+    for row, (number_top, cards, title_y) in SPORTSBOX_ROWS.items():
+        metrics = SPORTSBOX_METRICS if sway else (row,)
+        if all(all(metric in phase for metric in metrics) for phase in values.values()):
+            break
+        boxes = SPORTSBOX_BADGES[row]
         anchors = {}
         for code, badge, box in zip(SPORTSBOX_POSITIONS, ("Address", "TOP", "DAH"), boxes):
-            matches = _sportsbox_word_matches(white, box, glyphs[metric + "_" + badge], (185, 125))
+            search = (1300, 180) if sway else (185, 125)
+            matches = _sportsbox_word_matches(white, box, glyphs[row + "_" + badge], search)
             if matches:
                 _, x, y = matches[0]
                 anchors[code] = (x, y, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
@@ -1201,32 +1259,39 @@ def _read_shifted_sportsbox_layout(image, values):
                   for bx, by, br, _ in ordered[i + 1:] if abs(ay - by) < 32]
         scale_x = float(np.median([s for s in scales if .72 <= s <= 1.32] or [1.]))
         for code, (left, right) in zip(SPORTSBOX_POSITIONS, cards):
-            if metric in values[code] or code not in anchors:
+            if code not in anchors or all(metric in values[code] for metric in metrics):
                 continue
             x, y, ref_x, ref_y = anchors[code]
             tx = x + (left + 6 - ref_x) * scale_x
             ty = y + title_y - ref_y
             title_box = (round(tx), round(ty), round(tx + 139 * scale_x), round(ty + 29))
-            matches = _sportsbox_word_matches(white, title_box, [glyphs[metric]], (55, 43))
-            if not matches:
+            candidates = []
+            for metric in metrics:
+                matches = _sportsbox_word_matches(white, title_box, [titles[metric]], (55, 43))
+                if matches:
+                    candidates.append((*matches[0], metric))
+            candidates.sort()
+            if not candidates or (len(candidates) > 1 and candidates[1][0] - candidates[0][0] < .025):
                 continue
-            _, title_x, title_center = matches[0]
+            _, title_x, title_center, metric = candidates[0]
+            if metric in values[code]:
+                continue
             # The title confirms Chest/Pelvis, while the badge anchors the horizontal card.
             number_x = x + ((left + right) / 2 - ref_x) * scale_x
             number_y = title_center + number_top - title_y - 14.5
             if abs(title_x - (tx + 69.5 * scale_x)) > 58:
                 continue
-            value = _sportsbox_read_shifted_number(image, number_x, number_y, (right - left) * scale_x)
+            value = _sportsbox_read_shifted_number(image, number_x, number_y, (right - left) * scale_x, sway)
             if value is not None:
                 values[code][metric] = value
     return values
 
 
-def read_sportsbox_angles(data):
+def read_sportsbox_angles(data, sway=False):
     """Return detected values, leaving unconfirmed cells empty."""
     with Image.open(io.BytesIO(data)) as source:
         if source.width * source.height > 20_000_000:
-            raise ValueError("画像が大きすぎます。横長のTurn画面のスクリーンショットを選び直してください。")
+            raise ValueError("画像が大きすぎます。横長のSportsbox画面のスクリーンショットを選び直してください。")
         image = ImageOps.exif_transpose(source).convert("RGB")
 
     if min(image.size) < 240:
@@ -1237,9 +1302,9 @@ def read_sportsbox_angles(data):
     results = []
     for candidate in candidates:
         values = {code: {} for code in SPORTSBOX_POSITIONS}
-        if abs(candidate.width / candidate.height - SPORTSBOX_REFERENCE_SIZE[0] / SPORTSBOX_REFERENCE_SIZE[1]) <= .06:
+        if not sway and abs(candidate.width / candidate.height - SPORTSBOX_REFERENCE_SIZE[0] / SPORTSBOX_REFERENCE_SIZE[1]) <= .06:
             values = _read_sportsbox_layout(candidate)
-        results.append(_read_shifted_sportsbox_layout(candidate, values))
+        results.append(_read_shifted_sportsbox_layout(candidate, values, sway))
     return max(results, key=lambda values: sum(map(len, values.values())))
 
 
@@ -1266,45 +1331,90 @@ def _read_sportsbox_layout(image):
     return values
 
 
-def clear_sportsbox_image() -> None:
+def merge_sportsbox_readings(readings: list[dict]) -> tuple[dict, list]:
+    values = {code: {} for code in SPORTSBOX_POSITIONS}
+    conflicts = []
+    for code in values:
+        for metric in SPORTSBOX_METRICS:
+            candidates = {result.get(code, {}).get(metric) for result in readings} - {None}
+            if len(candidates) == 1:
+                values[code][metric] = candidates.pop()
+            elif candidates:
+                conflicts.append((code, metric))
+    return values, conflicts
+
+
+def clear_sportsbox_image(import_key: str, keep_if_selected: str | None = None) -> None:
     job = st.session_state.get("job")
-    if job:
-        job.pop("sportsbox_import", None)
+    if job and (keep_if_selected is None or not st.session_state.get(keep_if_selected)):
+        job.pop(import_key, None)
     clear_outputs()
 
 
 def sportsbox_settings(job: dict) -> None:
     token = job["token"]
     job["sportsbox_angles"] = {}
-    if not st.checkbox("Sportsboxの回転角を表示する（オプション）", key=f"sportsbox_enabled_{token}", on_change=clear_outputs):
+    job["sportsbox_sway"] = {}
+    if not st.checkbox("Sportsboxのデータを表示する（オプション）",
+                       key=f"sportsbox_enabled_{token}", on_change=clear_outputs):
         return
+    turn_tab, sway_tab = st.tabs(["Turn（回転角）", "Sway（左右移動量）"])
+    with turn_tab:
+        sportsbox_data_inputs(job, sway=False)
+    with sway_tab:
+        sportsbox_data_inputs(job, sway=True)
 
+
+def sportsbox_data_inputs(job: dict, sway: bool) -> None:
+    token = job["token"]
+    prefix = "sportsbox_sway" if sway else "sportsbox"
+    import_key = f"{prefix}_import"
+    output_key = "sportsbox_sway" if sway else "sportsbox_angles"
+    category = "Sway" if sway else "Turn"
+    field = "Sway（″）" if sway else "回転角（°）"
+    limit, step, fmt = (100., .1, "%.2f") if sway else (180, 1, "%d")
     user_agent = st.context.headers.get("User-Agent", "")
     default_mobile = bool(re.search(r"Android|iPhone|iPad|iPod|Mobile", user_agent, re.I))
     methods = ("通常", "スマホ向け（分割送信）", "手入力")
     method = st.radio(
-        "Sportsboxの入力方法", methods, index=int(default_mobile),
-        key=f"sportsbox_method_{token}", horizontal=True, on_change=clear_outputs,
+        f"{category}の入力方法", methods, index=int(default_mobile),
+        key=f"{prefix}_method_{token}", horizontal=True, on_change=clear_outputs,
     )
+    screenshots = []
     if method == "スマホ向け（分割送信）":
-        transport = job.setdefault("sportsbox_upload", {})
-        screenshot = mobile_upload("image", transport, f"sportsbox_mobile_{token}")
+        transport = job.setdefault(f"{prefix}_upload", {})
+        first = mobile_upload("image", transport, f"{prefix}_mobile_{token}")
+        if first is not None:
+            screenshots.append(first)
+        if sway:
+            with st.expander("2枚目のSway画像を追加"):
+                second = mobile_upload("image", job.setdefault("sportsbox_sway_upload_2", {}),
+                                       f"{prefix}_mobile_2_{token}")
+                if second is not None:
+                    screenshots.append(second)
     elif method == "通常":
-        screenshot = st.file_uploader(
-            "同じスイングのSportsbox画像を選択",
+        upload_key = f"{prefix}_file_{token}"
+        uploaded = st.file_uploader(
+            f"同じスイングの{category}画像を選択" + ("（複数可）" if sway else ""),
             type=["png", "jpg", "jpeg", "webp"],
-            key=f"sportsbox_file_{token}", on_change=clear_sportsbox_image,
-            help="Chest Turn・Pelvis Turnの行と、Address・TOP・DAHのラベルが見える画像を使用してください。",
+            accept_multiple_files=sway, key=upload_key, on_change=clear_sportsbox_image,
+            args=(import_key, upload_key if sway else None),
+            help=f"各画像にChest {category}またはPelvis {category}の項目名と、ポジションのラベルを入れてください。P7を読むにはDAHとその右隣の数値が必要です。",
         )
-    else:
-        screenshot = None
+        screenshots = (uploaded or []) if sway else ([uploaded] if uploaded else [])
 
-    state = job.get("sportsbox_import")
+    state = job.get(import_key)
+    source_files = sorted({image.file_id for image in screenshots})
+    names = "、".join(image.name for image in screenshots)
     if method == "手入力":
         source_id = "manual"
-    elif screenshot is not None:
-        source_id = f"{screenshot.file_id}:turn-v2"
-        st.caption(f"画像を受信しました　{screenshot.name}")
+    elif screenshots:
+        if sway:
+            digest = hashlib.sha256(json.dumps(source_files).encode()).hexdigest()[:24]
+            source_id = f"{digest}:sway-v2"
+        else:
+            source_id = f"{source_files[0]}:turn-v2"
+        st.caption(f"画像を受信しました　{names}")
     elif state and state.get("method") == method:
         source_id = state["id"]
         st.caption(f"保存された読み取り結果　{state.get('name', '')}")
@@ -1313,51 +1423,61 @@ def sportsbox_settings(job: dict) -> None:
 
     if state is None or state["id"] != source_id:
         clear_outputs()
-        error = None
-        values = {}
-        read_count = 0
-        if screenshot is not None:
-            with st.spinner("Sportsbox画像から回転角を読み取っています…"):
-                try:
-                    values = read_sportsbox_angles(screenshot.getbuffer())
-                    read_count = sum(map(len, values.values()))
-                except ValueError as exc:
-                    error = str(exc)
-                except (OSError, Image.DecompressionBombError):
-                    error = "画像を開けませんでした。端末のスクリーンショットをPNGまたはJPEGで選び直してください。"
-        if screenshot is not None and state and state["id"] == screenshot.file_id:
-            for code, metrics in state["values"].items():
-                for metric, value in metrics.items():
-                    if value is not None:
-                        values.setdefault(code, {})[metric] = value
+        errors = []
+        readings = []
+        if screenshots:
+            with st.spinner(f"Sportsbox画像から{category}を読み取っています…"):
+                for image in screenshots:
+                    try:
+                        readings.append(read_sportsbox_angles(image.getbuffer(), sway=sway))
+                    except ValueError as exc:
+                        errors.append(f"{image.name} — {exc}")
+                    except (OSError, Image.DecompressionBombError):
+                        errors.append(f"{image.name} — 画像を開けませんでした。")
+        detected, conflicts = merge_sportsbox_readings(readings)
+        values = copy.deepcopy(detected)
+        if state and source_files:
+            previous_files = state.get("source_files") or [state["id"].split(":")[0]]
+            if set(previous_files).issubset(source_files):
+                for code, metrics in state["values"].items():
+                    for metric, value in metrics.items():
+                        old_auto = state.get("detected", {}).get(code, {}).get(metric)
+                        if value is not None and value != old_auto and (code, metric) not in conflicts:
+                            values[code][metric] = value
         state = {
-            "id": source_id, "method": method, "name": screenshot.name if screenshot is not None else "",
-            "values": values, "error": error, "read_count": read_count,
+            "id": source_id, "method": method, "name": names, "source_files": source_files,
+            "values": values, "error": "\n\n".join(errors), "read_count": sum(map(len, detected.values())),
+            "detected": detected, "conflicts": conflicts,
         }
-        job["sportsbox_import"] = state
+        job[import_key] = state
 
     if state["error"]:
         st.warning(state["error"])
-    elif method != "手入力":
+    if method != "手入力":
         count = state["read_count"]
         if count:
             st.caption(f"画像から読み取った値　{count} / 6")
-        else:
-            st.warning("画像は受信できましたが、回転角を読み取れませんでした。Chest Turn・Pelvis Turnの行とポジションのラベルが入る画像を選ぶか、下の欄に入力してください。")
-    st.caption("画像と数値を照合し、必要に応じて修正してください。両方の角度がそろったポジションに表示します。")
+        elif not state["error"] and not state.get("conflicts"):
+            st.warning(f"{category}を読み取れませんでした。Chest {category}・Pelvis {category}の行とポジションのラベルが入る画像を選ぶか、下の欄に入力してください。")
+        conflicts = state.get("conflicts", [])
+        if conflicts:
+            labels = "、".join(f"{code} {SPORTSBOX_METRICS[metric]}" for code, metric in conflicts)
+            st.warning(f"画像間で値が異なる項目があります。元画像を照合して入力してください。対象は {labels} です。")
+    st.caption("元の画像と数値を照合し、必要に応じて修正してください。")
     values = {}
     for col, (code, position) in zip(st.columns(3), SPORTSBOX_POSITIONS.items()):
         col.markdown(f"**{code} · {position}**")
         values[code] = {}
         for metric, name in SPORTSBOX_METRICS.items():
+            value = state["values"].get(code, {}).get(metric)
             values[code][metric] = col.number_input(
-                f"{name}の回転角（°）", min_value=-180, max_value=180,
-                value=state["values"].get(code, {}).get(metric), step=1, format="%d",
+                f"{name}の{field}", min_value=-limit, max_value=limit,
+                value=float(value) if sway and value is not None else value, step=step, format=fmt,
                 placeholder="未読取",
-                key=f"sportsbox_{token}_{source_id}_{code}_{metric}", on_change=clear_outputs,
+                key=f"{prefix}_{token}_{source_id}_{code}_{metric}", on_change=clear_outputs,
             )
     state["values"] = values
-    job["sportsbox_angles"] = values
+    job[output_key] = values
     if any(value is None for pair in values.values() for value in pair.values()):
         st.info("読み取れなかった値は空欄です。画像を見ながら入力できます。")
 
@@ -1442,9 +1562,10 @@ def save_workspace() -> None:
     if not workspace_id or not job:
         return
     token = job["token"]
-    keys = WORKSPACE_SETTINGS | {f"sportsbox_enabled_{token}", f"sportsbox_method_{token}"}
+    keys = WORKSPACE_SETTINGS | {f"sportsbox_enabled_{token}", f"sportsbox_method_{token}", f"sportsbox_sway_method_{token}"}
     settings = {key: state[key] for key in keys if key in state}
-    saved_job = {key: value for key, value in job.items() if key not in {"sportsbox_upload", "output_images"}}
+    saved_job = {key: value for key, value in job.items()
+                 if key not in {"sportsbox_upload", "sportsbox_sway_upload", "sportsbox_sway_upload_2", "output_images"}}
     payload = json.dumps({"job": saved_job, "settings": settings}, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha256(payload.encode()).hexdigest()
     if digest == state.get("workspace_digest"):
