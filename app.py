@@ -34,7 +34,9 @@ COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0
 LINE_NAMES["right_leg_outer"] = "右脚の外側（P1基準線）"
 COLORS["right_leg_outer"] = "#1BC4D4"
 REAR_ONLY_LINES = ("back_vertical", "hip_right_knee")
-FRONT_ONLY_LINES = ("right_leg_outer",)
+LINE_NAMES["pelvis_circle"] = "骨盤中心の左右移動（円）"
+COLORS["pelvis_circle"] = "#FF9500"
+FRONT_ONLY_LINES = ("right_leg_outer", "pelvis_circle")
 DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES]
 FRONT_DEFAULT_LINES = ["head", "tilt", "shoulders", "ankles", *FRONT_ONLY_LINES]
 RIGHT_LEG_POINTS = ("right_ankle_outer", "right_thigh_outer")
@@ -120,7 +122,37 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
         for key, point_xy, factor in zip(RIGHT_LEG_POINTS, (right_ankle, right_hip), (.08, .22)):
             x, y = point_xy
             pose[key] = [min(1., max(0., x + outward * span * factor)), y]
+    pose["pelvis_visible"] = (
+        all(float(lm[i].visibility) >= .55 for i in (23, 24))
+        and valid_point(pose["hip"])
+    )
     return pose
+
+
+def shoulder_heading(image_landmarks, world_landmarks):
+    """Estimate the horizontal direction of the shoulder axis."""
+    if len(world_landmarks) <= 12:
+        return None
+    if not all(float(image_landmarks[i].visibility) >= .60 for i in (11, 12)):
+        return None
+    left, right = world_landmarks[11], world_landmarks[12]
+    dx, dz = float(left.x - right.x), float(left.z - right.z)
+    if not all(map(math.isfinite, (dx, dz))) or math.hypot(dx, dz) < .10:
+        return None
+    return math.atan2(dz, dx)
+
+
+def shoulder_turn(job, phase):
+    headings = []
+    for code in ("P1", phase):
+        pose = job["poses"][job["p_frames"][code]] or {}
+        heading = pose.get("shoulder_heading")
+        if heading is None:
+            return None
+        headings.append(heading)
+    delta = headings[1] - headings[0]
+    signed = math.atan2(math.sin(delta), math.cos(delta))
+    return round(math.degrees(signed) * job.get("target_dir", -1))
 
 
 def analyze_skeleton(path: Path, info: dict, progress=None) -> list:
@@ -140,7 +172,15 @@ def analyze_skeleton(path: Path, info: dict, progress=None) -> list:
                     break
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 result = detector.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), round(i*1000/info["fps"]))
-                poses.append(pose_to_dict(result.pose_landmarks[0], info["width"], info["height"]) if result.pose_landmarks else None)
+                pose = None
+                if result.pose_landmarks:
+                    landmarks = result.pose_landmarks[0]
+                    pose = pose_to_dict(landmarks, info["width"], info["height"])
+                    if result.pose_world_landmarks:
+                        pose["shoulder_heading"] = shoulder_heading(
+                            landmarks, result.pose_world_landmarks[0]
+                        )
+                poses.append(pose)
                 i += 1
                 if progress and (i % 5 == 0 or i == info["frames"]):
                     progress(min(1., i/max(1,info["frames"])), f"骨格解析 {i} / {info['frames']} コマ")
@@ -381,6 +421,26 @@ def right_leg_reference(job: dict) -> tuple[list, list] | None:
     return None
 
 
+def pelvis_circles(job: dict, frame: int, style: dict) -> list:
+    poses = job["poses"]
+    reference = poses[job["p_frames"]["P1"]] or {}
+    current = poses[frame] or {}
+    origin = reference.get("hip") if reference.get("pelvis_visible") else None
+    guides = job["guides"]
+    anchor = guides.get("pelvis_center") or origin
+    if anchor is None:
+        return []
+    base = {**style, "type": "circle", "radius": guides.get("pelvis_radius", .045),
+            "anchor": anchor}
+    circles = [{**base, "id": "pelvis_reference", "center": anchor,
+                "dash": "dashed", "dx": 0}]
+    if origin and current.get("pelvis_visible"):
+        dx = current["hip"][0] - origin[0]
+        circles.append({**base, "id": "pelvis_circle", "dash": "solid",
+                        "center": [anchor[0] + dx, anchor[1]], "dx": dx})
+    return circles
+
+
 def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, custom_positions: list | None = None) -> list:
     body, g = get_pose(job,frame,phase),job["guides"]
     out = []
@@ -393,7 +453,7 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
     front = job.get("camera_mode") == "front"
     hidden_lines = REAR_ONLY_LINES if front else FRONT_ONLY_LINES
     for code,s in cfg.items():
-        if not s["enabled"] or (code != "right_leg_outer" and not in_positions(frame,s["positions"],job["p_frames"])):
+        if not s["enabled"] or (code not in ("right_leg_outer", "hip_right_knee") and not in_positions(frame,s["positions"],job["p_frames"])):
             continue
         if code in hidden_lines:
             continue
@@ -405,6 +465,8 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
                 delta=[body["head"][i]-origin[i] for i in range(2)]
                 center=[g["head"][i]+delta[i] for i in range(2)]
                 out.append({**s,"type":"circle","id":code,"center":center,"radius":g["radius"],"head_delta":delta})
+        elif code == "pelvis_circle":
+            out.extend(pelvis_circles(job, frame, s))
         elif code in ("spine","tilt") and body:
             if code=="tilt":
                 out.append({"type":"line","id":"tilt_zero","a":body["hip"][:],"b":[body["hip"][0],body["sh"][1]],"angle":False,"color":"#FFFFFF","width":2,"dash":"dashed"})
@@ -430,8 +492,11 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
             x = g.get("back_vertical", .65)
             top, bottom = (g["top"], g["bottom"]) if g.get("head") else (.12, .90)
             add_line(code, [x, top], [x, bottom])
-        elif code == "hip_right_knee" and body and valid_point(body.get("rk")):
-            add_line(code, body["hip"], body["rk"], angle=True)
+        elif code == "hip_right_knee":
+            if frame == job["p_frames"]["P1"] and phase in (None, "P1"):
+                knee_pose = job["body_overrides"].get("P1") or job["poses"][frame]
+                if knee_pose and all(valid_point(knee_pose.get(k)) for k in ("hip", "rk")):
+                    add_line(code, knee_pose["hip"], knee_pose["rk"], angle=True)
         elif code == "right_leg_outer":
             frames = job["p_frames"]
             if frames["P1"] <= frame <= frames["P4"] and (phase is None or phase in P_CODES[:4]):
@@ -459,6 +524,11 @@ def sportsbox_value_color(value: float, bounds: tuple[float, float]) -> str:
 
 def sportsbox_overlay(job: dict, phase: str) -> list[list[list[tuple[str, str]]]]:
     panels = []
+    if job.get("camera_mode") == "front" and job.get("show_shoulder_turn", True):
+        angle = shoulder_turn(job, phase)
+        if angle is not None:
+            value = f"{angle:+d}°" if angle else "0°"
+            panels.append([[("肩の回転（推定）  " + value, "white")]])
     profile = job.get("sportsbox_iron_profile", "male")
     ranges = SPORTSBOX_IRON_RANGES.get(profile, SPORTSBOX_IRON_RANGES["male"])
     angles = job.get("sportsbox_angles", {}).get(phase, {})
@@ -689,6 +759,12 @@ def accept_editor_event(job: dict,event: dict | None,phase: str,frame: int) -> b
         for name in ["hip","vertical","back_vertical","top","bottom","radius"]:
             value=g.get(name)
             if isinstance(value,(float,int)) and math.isfinite(value) and 0<=value<=1:job["guides"][name]=value;changed=True
+        if phase == "P1" and valid_point(g.get("pelvis_center")):
+            job["guides"]["pelvis_center"] = g["pelvis_center"]
+            radius = g.get("pelvis_radius")
+            if isinstance(radius, (int, float)) and .01 <= radius <= .25:
+                job["guides"]["pelvis_radius"] = radius
+            changed = True
         if valid_point(g.get("head")):job["guides"]["head"]=g["head"];changed=True
         if isinstance(g.get("shaft"),list) and len(g["shaft"])==2 and all(valid_point(p) for p in g["shaft"]):job["guides"]["shaft"]=g["shaft"];changed=True
         if isinstance(g.get("ankles"),list) and len(g["ankles"])==2 and all(isinstance(v,(float,int)) and math.isfinite(v) and 0<=v<=1 for v in g["ankles"]):job["guides"]["ankles"]=g["ankles"];changed=True
@@ -740,10 +816,22 @@ function height(){const h=Math.ceil($('root').getBoundingClientRect().height)+8;
 function visible(s){return s.target_p?s.target_p===args.phase:args.custom_visible!==false;}
 function style(s){ctx.strokeStyle=s.color||'#ffff00';ctx.lineWidth=Math.max(1,(s.width||3)*canvas.height/1080);ctx.lineCap=s.dash==='dashed'?'butt':'round';ctx.lineJoin='round';const dash=Math.max(2,4*canvas.height/1080);ctx.setLineDash(s.dash==='dashed'?[dash,dash]:[]);}
 function text(label,p,color,angle=false){ctx.save();ctx.font=`bold ${angle?Math.max(14,canvas.height*26/1080):Math.max(18,canvas.height*.03)}px sans-serif`;ctx.lineWidth=angle?2:3;ctx.strokeStyle='#101c17';ctx.fillStyle=color;ctx.setLineDash([]);const x=clamp(p[0],0,.88)*canvas.width,y=clamp(p[1],.03,.97)*canvas.height;ctx.strokeText(label,x,y);ctx.fillText(label,x,y);ctx.restore();}
-function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaft;s.a=a;s.b=[a[0]+(b[0]-a[0])*2.2,a[1]+(b[1]-a[1])*2.2];s.label_pos=[a[0]+(b[0]-a[0])*.45+.014,a[1]+(b[1]-a[1])*.45+.015];}if(s.id==='hip'){s.a=[g.hip,g.top];s.b=[g.hip,g.bottom];}if(s.id==='vertical'){s.a=[g.vertical,g.top];s.b=[g.vertical,g.bottom];}if(s.id==='back_vertical'){s.a[0]=s.b[0]=g.back_vertical;}if(s.id==='ankles'){s.a=[g.ankles[s.part],g.top];s.b=[g.ankles[s.part],g.bottom];}if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='right_leg_outer'&&args.phase==='P1'){s.a=body.right_ankle_outer;s.b=body.right_thigh_outer;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
+function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaft;s.a=a;s.b=[a[0]+(b[0]-a[0])*2.2,a[1]+(b[1]-a[1])*2.2];s.label_pos=[a[0]+(b[0]-a[0])*.45+.014,a[1]+(b[1]-a[1])*.45+.015];}if(s.id==='hip'){s.a=[g.hip,g.top];s.b=[g.hip,g.bottom];}if(s.id==='vertical'){s.a=[g.vertical,g.top];s.b=[g.vertical,g.bottom];}if(s.id==='back_vertical'){s.a[0]=s.b[0]=g.back_vertical;}if(s.id==='ankles'){s.a=[g.ankles[s.part],g.top];s.b=[g.ankles[s.part],g.bottom];}if(s.id==='pelvis_reference'||s.id==='pelvis_circle'){
+    const p=g.pelvis_center||s.anchor;
+    s.center=[p[0]+s.dx,p[1]];
+    s.radius=g.pelvis_radius||s.radius;
+}if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='right_leg_outer'&&args.phase==='P1'){s.a=body.right_ankle_outer;s.b=body.right_thigh_outer;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
 function draw(s){ctx.save();style(s);ctx.beginPath();if(s.type==='line'){ctx.moveTo(s.a[0]*canvas.width,s.a[1]*canvas.height);ctx.lineTo(s.b[0]*canvas.width,s.b[1]*canvas.height);}else if(s.type==='circle'&&s.center){ctx.arc(s.center[0]*canvas.width,s.center[1]*canvas.height,s.radius*canvas.width,0,Math.PI*2);}else if(s.type==='free'){s.points.forEach((p,i)=>i?ctx.lineTo(p[0]*canvas.width,p[1]*canvas.height):ctx.moveTo(p[0]*canvas.width,p[1]*canvas.height));}ctx.stroke();ctx.restore();if(s.type==='line'&&s.angle){let a=Math.round(Math.atan2(Math.abs((s.b[1]-s.a[1])*canvas.height),Math.abs((s.b[0]-s.a[0])*canvas.width))*180/Math.PI);if(s.vertical){const dx=(s.b[0]-s.a[0])*canvas.width,dy=(s.b[1]-s.a[1])*canvas.height;a=Math.round(Math.atan2(Math.abs(dx),Math.abs(dy))*180/Math.PI);if(dx*(s.target_dir||-1)<0)a=-a;}text(a+'°',s.label_pos||[(s.a[0]+s.b[0])/2+.014,(s.a[1]+s.b[1])/2-.01],s.color,true);}}
 function handles(){const out=[],shown=id=>args.primitives.some(s=>s.id===id);const add=(p,type,key,extra={})=>{if(p)out.push({p,type,key,...extra});};if(shown('shaft'))g.shaft.forEach((p,i)=>add(p,'shaft',i,{label:i===0?'ヘッド側':'グリップ側',color:i===0?'#58d6ef':'#e9f38a'}));if(shown('hip'))add([g.hip,(g.top+g.bottom)/2],'hip',null,{label:'ヒップ',color:'#ffbf69'});
-if(args.active_line==='head'&&shown('head_reference')&&g.head){add(g.head,'head');add([g.head[0]+g.radius,g.head[1]],'radius');}if(args.active_line==='vertical'&&shown('vertical'))add([g.vertical,(g.top+g.bottom)/2],'vertical');if(args.active_line==='back_vertical'&&shown('back_vertical')){const s=args.primitives.find(p=>p.id==='back_vertical');add([g.back_vertical,(s.a[1]+s.b[1])/2],'back_vertical');}if(args.active_line==='ankles'&&shown('ankles'))g.ankles.forEach((x,i)=>add([x,(g.top+g.bottom)/2],'ankles',i));
+if(args.active_line==='pelvis_circle'&&args.phase==='P1'){
+    const reference=args.primitives.find(s=>s.id==='pelvis_reference');
+    if(reference){
+        const s=geometry(reference);
+        add(s.center,'pelvisCenter',null,{color:s.color});
+        add([s.center[0]+s.radius,s.center[1]],'pelvisRadius',null,
+            {center:s.center,color:s.color});
+    }
+}if(args.active_line==='head'&&shown('head_reference')&&g.head){add(g.head,'head');add([g.head[0]+g.radius,g.head[1]],'radius');}if(args.active_line==='vertical'&&shown('vertical'))add([g.vertical,(g.top+g.bottom)/2],'vertical');if(args.active_line==='back_vertical'&&shown('back_vertical')){const s=args.primitives.find(p=>p.id==='back_vertical');add([g.back_vertical,(s.a[1]+s.b[1])/2],'back_vertical');}if(args.active_line==='ankles'&&shown('ankles'))g.ankles.forEach((x,i)=>add([x,(g.top+g.bottom)/2],'ankles',i));
 if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)){add(body.sh,'body','sh');add(body.hip,'body','hip');}if(args.active_line==='shoulders'&&shown('shoulders')){add(body.ls,'body','ls');add(body.rs,'body','rs');}if(args.active_line==='hip_right_knee'&&shown('hip_right_knee')){add(body.hip,'body','hip');add(body.rk,'body','rk');}if(args.phase==='P1'&&args.active_line==='right_leg_outer'&&shown('right_leg_outer')){add(body.right_ankle_outer,'body','right_ankle_outer');add(body.right_thigh_outer,'body','right_thigh_outer');}}
 shapes.forEach((s,i)=>{if(!visible(s))return;if(s.type==='line'){add(s.a,'custom',i,{end:'a'});add(s.b,'custom',i,{end:'b'});}if(s.type==='circle'){add(s.center,'custom',i,{end:'center'});add([s.center[0]+s.radius,s.center[1]],'custom',i,{end:'radius'});}if(s.type==='free'&&s.points.length)add(s.points[0],'custom',i,{end:'free'});});return out;}
 function drawSportsbox(panels){
@@ -795,7 +883,14 @@ const candidates=[];if(args.primitives.some(s=>s.id==='hip'))candidates.push({ty
 function translate(pts,delta){const dx=clamp(delta[0],-Math.min(...pts.map(p=>p[0])),1-Math.max(...pts.map(p=>p[0]))),dy=clamp(delta[1],-Math.min(...pts.map(p=>p[1])),1-Math.max(...pts.map(p=>p[1])));return pts.map(p=>[p[0]+dx,p[1]+dy]);}
 let activePointer=null;
 canvas.addEventListener('pointerdown',e=>{if(!args||args.disabled||activePointer!==null||!e.isPrimary||e.button!==0)return;activePointer=e.pointerId;const p=pos(e);canvas.setPointerCapture(e.pointerId);if(tool==='move'){drag=hit(p);if(drag){remember();drag.last=p;$('saved').textContent='調整中…';}}else{remember();const base={color:$('color').value,width:Number($('width').value),dash:$('dash').value,target_p:$('bind').checked?args.phase:null};if(tool==='line')active={type:'line',a:p,b:[...p],angle:$('angle').checked,...base};if(tool==='circle')active={type:'circle',center:p,radius:.001,...base};if(tool==='free')active={type:'free',points:[p],...base};}e.preventDefault();});
-canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'||d.type==='back_vertical'){g[d.type]=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='head'){g.head=p;changedG=true;}else if(d.type==='radius'){g.radius=clamp(Math.hypot((p[0]-g.head[0])*canvas.width,(p[1]-g.head[1])*canvas.height)/canvas.width,.01,.25);changedG=true;}else if(d.type==='body'){if(d.key==='sh'){const delta=[p[0]-body.sh[0],p[1]-body.sh[1]];body.ls=[clamp(body.ls[0]+delta[0]),clamp(body.ls[1]+delta[1])];body.rs=[clamp(body.rs[0]+delta[0]),clamp(body.rs[1]+delta[1])];}body[d.key]=p;if(['ls','rs'].includes(d.key))body.sh=[(body.ls[0]+body.rs[0])/2,(body.ls[1]+body.rs[1])/2];changedB=true;}else if(d.type==='custom'){const s=shapes[d.key];if(d.end==='radius')s.radius=clamp(Math.hypot((p[0]-s.center[0])*canvas.width,(p[1]-s.center[1])*canvas.height)/canvas.width,.003,2);else if(d.end==='free'){s.points=translate(s.points,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;}else s[d.end]=p;changedS=true;}}
+canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'||d.type==='back_vertical'){g[d.type]=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='pelvisCenter'){
+    g.pelvis_center=p;changedG=true;
+}else if(d.type==='pelvisRadius'){
+    g.pelvis_center=d.center;
+    g.pelvis_radius=clamp(Math.hypot((p[0]-d.center[0])*canvas.width,
+        (p[1]-d.center[1])*canvas.height)/canvas.width,.01,.25);
+    changedG=true;
+}else if(d.type==='head'){g.head=p;changedG=true;}else if(d.type==='radius'){g.radius=clamp(Math.hypot((p[0]-g.head[0])*canvas.width,(p[1]-g.head[1])*canvas.height)/canvas.width,.01,.25);changedG=true;}else if(d.type==='body'){if(d.key==='sh'){const delta=[p[0]-body.sh[0],p[1]-body.sh[1]];body.ls=[clamp(body.ls[0]+delta[0]),clamp(body.ls[1]+delta[1])];body.rs=[clamp(body.rs[0]+delta[0]),clamp(body.rs[1]+delta[1])];}body[d.key]=p;if(['ls','rs'].includes(d.key))body.sh=[(body.ls[0]+body.rs[0])/2,(body.ls[1]+body.rs[1])/2];changedB=true;}else if(d.type==='custom'){const s=shapes[d.key];if(d.end==='radius')s.radius=clamp(Math.hypot((p[0]-s.center[0])*canvas.width,(p[1]-s.center[1])*canvas.height)/canvas.width,.003,2);else if(d.end==='free'){s.points=translate(s.points,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;}else s[d.end]=p;changedS=true;}}
 if(active){if(active.type==='line')active.b=p;if(active.type==='circle')active.radius=Math.max(.001,Math.hypot((p[0]-active.center[0])*canvas.width,(p[1]-active.center[1])*canvas.height)/canvas.width);if(active.type==='free'&&active.points.length<5000)active.points.push(p);}render();e.preventDefault();});
 function finishGesture(e){if(e.pointerId!==activePointer)return;activePointer=null;if(active){const valid=active.type==='free'?active.points.length>=2:active.type==='circle'?active.radius>.003:Math.hypot(active.a[0]-active.b[0],active.a[1]-active.b[1])>.005;if(valid){shapes.push(active);changedS=true;}active=null;}drag=null;render();emit();}
 for(const name of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(name,finishGesture);
@@ -926,6 +1021,8 @@ def switch_mode(front=False):
 
 def frame_change(code,widget):
     job=st.session_state["job"];job["p_frames"][code]=int(st.session_state[widget]);job["body_overrides"].pop(code,None)
+    if code == "P1":
+        job["guides"].pop("pelvis_center", None)
     if code=="P1" and not job.get("guides_manual"):
         ref=job["poses"][job["p_frames"][code]]
         if ref:job["guides"]=initial_guides(ref,job["info"])
@@ -1703,7 +1800,7 @@ WORKSPACE_SETTINGS = {
     "active_p", "active_line", "camera_mode", "enabled_lines", "styles",
     "show_p1_reference", "target_side", "custom_positions", "show_phase_list",
     "pause_positions", "pause_seconds", "snapshot_positions", "upload_method",
-    "back_vertical_dash_initialized", "swing_handedness",
+    "back_vertical_dash_initialized", "swing_handedness", "show_shoulder_turn",
 }
 
 
@@ -1816,6 +1913,9 @@ def render_app():
     if styles and "right_leg_outer" not in styles and not rear_mode:
         current_lines = st.session_state["enabled_lines"]
         st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, *FRONT_ONLY_LINES]))
+    if styles and "pelvis_circle" not in styles and not rear_mode:
+        current_lines = st.session_state["enabled_lines"]
+        st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, "pelvis_circle"]))
     for key, color in COLORS.items():
         styles.setdefault(key, {"color":color, "width":3, "dash":"dashed" if key in ("hip", "back_vertical") else "solid", "positions":[]})
     if not st.session_state.get("back_vertical_dash_initialized"):
@@ -1838,7 +1938,10 @@ def render_app():
         st.caption("線はプレビュー上の丸、またはシャフト・ヒップの線をドラッグして動かせます。")
         if st.session_state["camera_mode"]=="back":
             st.checkbox("P1の胸・腰の基準線（白点線・太さ2）",value=True,key="show_p1_reference",on_change=clear_outputs)
-        if "tilt" in enabled:
+        if not rear_mode:
+            st.checkbox("肩の回転（推定）を表示", value=True,
+                        key="show_shoulder_turn", on_change=clear_outputs)
+        if "tilt" in enabled or not rear_mode:
             st.selectbox("目標方向（画面上）",["左","右"],key="target_side",on_change=clear_outputs,help="胸が腰より目標側なら正、反対側ならマイナスです。")
         custom_positions=st.multiselect("共通の手描き図形を表示するP",P_CODES,default=[],key="custom_positions",help="未選択なら全フレームに表示します。",on_change=clear_outputs)
         with st.expander("読み込みの詳細設定"):
@@ -1888,6 +1991,11 @@ def render_app():
         return
     sportsbox_settings(job)
     job["camera_mode"] = st.session_state["camera_mode"]
+    if "show_shoulder_turn" not in job:
+        clear_outputs()
+    job["show_shoulder_turn"] = st.session_state.get("show_shoulder_turn", True)
+    if not rear_mode and not any(pose and "pelvis_visible" in pose for pose in job["poses"]):
+        st.caption("骨盤の円と肩の回転を表示するには、AI骨格解析を有効にして動画を読み込み直してください。")
     if "back_vertical" not in job["guides"]:
         reference = get_pose(job, job["p_frames"]["P1"], "P1")
         job["guides"]["back_vertical"] = rear_reference_x(reference)
@@ -1935,12 +2043,15 @@ def render_app():
                 finally:
                     progress.empty()
     if line == "hip_right_knee":
-        st.caption("右ひざを検出したコマに、画面の水平線（0°）に対する角度を表示します。腰側とひざ側の丸をドラッグして調整できます。")
+        st.caption("後方撮影のP1だけに表示します。P1で腰側とひざ側の丸をドラッグして調整できます。")
+    if line == "pelvis_circle":
+        st.caption("点線はP1の骨盤中心、実線は同じ高さで横方向だけ追従します。P1で丸の位置と大きさを調整できます。")
     if line == "right_leg_outer":
         st.caption("P1の外くるぶしと太ももの付け根を結び、同じ位置・角度でP4まで表示します。P1で両端の丸をドラッグして調整できます。角度の基準は画面の水平線（0°）です。")
     with st.expander("点線・表示するPを変更"):
-        style["dash"]=st.selectbox("種類",["solid","dashed"],index=["solid","dashed"].index(style["dash"]),format_func=lambda x:"実線" if x=="solid" else "点線",key=f"dash_{line}",on_change=clear_outputs)
-        if line not in ("shoulders", "right_leg_outer"):
+        if line != "pelvis_circle":
+            style["dash"]=st.selectbox("種類",["solid","dashed"],index=["solid","dashed"].index(style["dash"]),format_func=lambda x:"実線" if x=="solid" else "点線",key=f"dash_{line}",on_change=clear_outputs)
+        if line not in ("shoulders", "right_leg_outer", "hip_right_knee"):
             style["positions"]=st.multiselect("この線を表示するポジション（複数選択可）",P_CODES,default=style["positions"],key=f"positions_{line}",help="未選択なら全フレームに表示します。",on_change=clear_outputs)
     if "shoulders" in enabled:
         shoulder_style=st.session_state["styles"]["shoulders"]
