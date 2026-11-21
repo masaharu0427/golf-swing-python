@@ -34,7 +34,7 @@ COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0
 LINE_NAMES["right_leg_outer"] = "右脚の外側（P1基準線）"
 COLORS["right_leg_outer"] = "#1BC4D4"
 REAR_ONLY_LINES = ("back_vertical", "hip_right_knee")
-LINE_NAMES["pelvis_circle"] = "骨盤中心の上下左右の動き（円）"
+LINE_NAMES["pelvis_circle"] = "骨盤中心の左右の動き（円）"
 COLORS["pelvis_circle"] = "#FF9500"
 FRONT_ONLY_LINES = ("right_leg_outer", "pelvis_circle")
 DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES]
@@ -124,7 +124,7 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
             pose[key] = [min(1., max(0., x + outward * span * factor)), y]
     pose["pelvis_visible"] = (
         all(float(lm[i].visibility) >= .55 for i in (23, 24))
-        and valid_point(pose["hip"])
+        and all(valid_point(point) for point in (left_hip, right_hip))
     )
     return pose
 
@@ -387,11 +387,30 @@ def right_leg_reference(job: dict) -> tuple[list, list] | None:
     return None
 
 
+def pelvis_x(poses: list, frame: int, fps: float) -> float | None:
+    pose = poses[frame] or {}
+    if not pose.get("pelvis_visible"):
+        return None
+    x = pose["hip"][0]
+    if fps < 24 or not 0 < frame < len(poses) - 1:
+        return x
+
+    previous, following = poses[frame - 1] or {}, poses[frame + 1] or {}
+    if not (previous.get("pelvis_visible") and following.get("pelvis_visible")):
+        return x
+    left, right = sorted((previous["hip"][0], following["hip"][0]))
+    nearest_jump = max(left - x, x - right, 0)
+    # Correct only a pronounced one-frame excursion when the neighbors agree.
+    if nearest_jump >= .01 and nearest_jump >= 2 * (right - left):
+        return (left + right) / 2
+    return x
+
+
 def pelvis_circles(job: dict, frame: int, style: dict) -> list:
     poses = job["poses"]
-    reference = poses[job["p_frames"]["P1"]] or {}
-    current = poses[frame] or {}
-    origin = reference.get("hip") if reference.get("pelvis_visible") else None
+    reference_frame = job["p_frames"]["P1"]
+    reference = poses[reference_frame] or {}
+    origin = reference["hip"] if reference.get("pelvis_visible") else None
     guides = job["guides"]
     anchor = guides.get("pelvis_center") or origin
     if anchor is None:
@@ -400,8 +419,11 @@ def pelvis_circles(job: dict, frame: int, style: dict) -> list:
             "anchor": anchor}
     circles = [{**base, "id": "pelvis_reference", "center": anchor,
                 "dash": "dashed", "offset": [0, 0]}]
-    if origin and current.get("pelvis_visible"):
-        offset = [value - start for value, start in zip(current["hip"], origin)]
+    fps = job["info"]["fps"]
+    current_x = pelvis_x(poses, frame, fps)
+    if origin is not None and current_x is not None:
+        reference_x = pelvis_x(poses, reference_frame, fps)
+        offset = [current_x - reference_x, 0]
         center = [start + delta for start, delta in zip(anchor, offset)]
         circles.append({**base, "id": "pelvis_circle", "dash": "solid",
                         "center": center, "offset": offset})
@@ -797,7 +819,12 @@ if(args.active_line==='pelvis_circle'){
             {center:s.center,color:s.color});
     }
 }if(args.active_line==='head'&&shown('head_reference')&&g.head){add(g.head,'head');add([g.head[0]+g.radius,g.head[1]],'radius');}if(args.active_line==='vertical'&&shown('vertical'))add([g.vertical,(g.top+g.bottom)/2],'vertical');if(args.active_line==='back_vertical'&&shown('back_vertical')){const s=args.primitives.find(p=>p.id==='back_vertical');add([g.back_vertical,(s.a[1]+s.b[1])/2],'back_vertical');}if(args.active_line==='ankles'&&shown('ankles'))g.ankles.forEach((x,i)=>add([x,(g.top+g.bottom)/2],'ankles',i));
-if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)){add(body.sh,'body','sh');add(body.hip,'body','hip');}if(args.active_line==='shoulders'&&shown('shoulders')){add(body.ls,'body','ls');add(body.rs,'body','rs');}if(args.active_line==='hip_right_knee'&&shown('hip_right_knee')){add(body.hip,'body','hip');add(body.rk,'body','rk');}if(args.phase==='P1'&&args.active_line==='right_leg_outer'&&shown('right_leg_outer')){add(body.right_ankle_outer,'body','right_ankle_outer');add(body.right_thigh_outer,'body','right_thigh_outer');}}
+if(body){if(['spine','tilt'].includes(args.active_line)&&shown(args.active_line)){
+    add(body.sh,'body','sh',{label:'胸の中心'});
+    add(body.hip,'body','hip',{label:'腰の中心'});
+    const midpoint=body.sh.map((value,i)=>(value+body.hip[i])/2);
+    add(midpoint,'torsoMove',null,{label:'線全体',color:'#ffffff'});
+}if(args.active_line==='shoulders'&&shown('shoulders')){add(body.ls,'body','ls');add(body.rs,'body','rs');}if(args.active_line==='hip_right_knee'&&shown('hip_right_knee')){add(body.hip,'body','hip');add(body.rk,'body','rk');}if(args.phase==='P1'&&args.active_line==='right_leg_outer'&&shown('right_leg_outer')){add(body.right_ankle_outer,'body','right_ankle_outer');add(body.right_thigh_outer,'body','right_thigh_outer');}}
 shapes.forEach((s,i)=>{if(!visible(s))return;if(s.type==='line'){add(s.a,'custom',i,{end:'a'});add(s.b,'custom',i,{end:'b'});}if(s.type==='circle'){add(s.center,'custom',i,{end:'center'});add([s.center[0]+s.radius,s.center[1]],'custom',i,{end:'radius'});}if(s.type==='free'&&s.points.length)add(s.points[0],'custom',i,{end:'free'});});return out;}
 function drawSportsbox(panels){
     if(!panels?.length)return;
@@ -848,7 +875,13 @@ const candidates=[];if(args.primitives.some(s=>s.id==='hip'))candidates.push({ty
 function translate(pts,delta){const dx=clamp(delta[0],-Math.min(...pts.map(p=>p[0])),1-Math.max(...pts.map(p=>p[0]))),dy=clamp(delta[1],-Math.min(...pts.map(p=>p[1])),1-Math.max(...pts.map(p=>p[1])));return pts.map(p=>[p[0]+dx,p[1]+dy]);}
 let activePointer=null;
 canvas.addEventListener('pointerdown',e=>{if(!args||args.disabled||activePointer!==null||!e.isPrimary||e.button!==0)return;activePointer=e.pointerId;const p=pos(e);canvas.setPointerCapture(e.pointerId);if(tool==='move'){drag=hit(p);if(drag){remember();drag.last=p;$('saved').textContent='調整中…';}}else{remember();const base={color:$('color').value,width:Number($('width').value),dash:$('dash').value,target_p:$('bind').checked?args.phase:null};if(tool==='line')active={type:'line',a:p,b:[...p],angle:$('angle').checked,...base};if(tool==='circle')active={type:'circle',center:p,radius:.001,...base};if(tool==='free')active={type:'free',points:[p],...base};}e.preventDefault();});
-canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'||d.type==='back_vertical'){g[d.type]=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='pelvisCenter'){
+canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'||d.type==='back_vertical'){g[d.type]=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='torsoMove'){
+    const delta=p.map((value,i)=>value-d.last[i]);
+    const [hip,sh,ls,rs]=translate([body.hip,body.sh,body.ls,body.rs],delta);
+    Object.assign(body,{hip,sh,ls,rs});
+    d.last=p;
+    changedB=true;
+}else if(d.type==='pelvisCenter'){
     g.pelvis_center=p.map((value,i)=>clamp(value-d.offset[i]));
     changedG=true;
 }else if(d.type==='pelvisRadius'){
@@ -1977,10 +2010,10 @@ def render_app():
     if job.pop("show_shoulder_turn", False) and job.get("camera_mode") == "front":
         clear_outputs()
     job["camera_mode"] = st.session_state["camera_mode"]
-    if not job.get("pelvis_tracks_both_axes"):
+    if not job.get("pelvis_horizontal_tracking"):
         if not rear_mode and "pelvis_circle" in enabled:
             clear_outputs()
-        job["pelvis_tracks_both_axes"] = True
+        job["pelvis_horizontal_tracking"] = True
     if not rear_mode and not any(pose and "pelvis_visible" in pose for pose in job["poses"]):
         st.caption("骨盤の円を表示するには、AI骨格解析を有効にして動画を読み込み直してください。")
     if "back_vertical" not in job["guides"]:
@@ -2003,6 +2036,8 @@ def render_app():
     style["color"]=color_col.color_picker("線の色",style["color"],key=f"color_{line}",on_change=clear_outputs)
     style["width"]=width_col.selectbox("線の太さ",[1,2,3,4,5,6,8],index=[1,2,3,4,5,6,8].index(style["width"]),format_func=lambda v:f"{v}px",key=f"width_{line}",on_change=clear_outputs)
     if line=="head":st.caption("点線の円はP1の基準位置、もう1つの円は頭の動きに追従します。丸をドラッグすると基準位置・大きさを調整できます。")
+    if line in ("spine", "tilt"):
+        st.caption("「線を動かす」で、胸・腰の点をドラッグすると角度が変わります。「線全体」の白い点をドラッグすると、角度を保ったまま移動できます。")
     if line=="tilt":st.caption("白い点線が垂直＝0°です。胸が腰より目標側なら正、反対側ならマイナスで表示します。目標方向は左側の管理線設定で変更できます。")
     if line == "back_vertical":
         st.caption("P1の頭頂から足元までを目安にした垂直線です。丸をドラッグすると左右に移動します。")
@@ -2032,7 +2067,7 @@ def render_app():
     if line == "hip_right_knee":
         st.caption("後方撮影のP1だけに表示します。P1で腰側とひざ側の丸をドラッグして調整できます。")
     if line == "pelvis_circle":
-        st.caption("点線はP1の基準、実線は骨盤中心に追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
+        st.caption("点線はP1の基準、実線は同じ高さで骨盤中心の左右の動きに追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
     if line == "right_leg_outer":
         st.caption("P1の外くるぶしと太ももの付け根を結び、同じ位置・角度でP4まで表示します。P1で両端の丸をドラッグして調整できます。角度の基準は画面の水平線（0°）です。")
     with st.expander("点線・表示するPを変更"):
