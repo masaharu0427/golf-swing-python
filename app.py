@@ -34,7 +34,7 @@ COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0
 LINE_NAMES["right_leg_outer"] = "右脚の外側（P1基準線）"
 COLORS["right_leg_outer"] = "#1BC4D4"
 REAR_ONLY_LINES = ("back_vertical", "hip_right_knee")
-LINE_NAMES["pelvis_circle"] = "骨盤中心の左右移動（円）"
+LINE_NAMES["pelvis_circle"] = "骨盤中心の上下左右の動き（円）"
 COLORS["pelvis_circle"] = "#FF9500"
 FRONT_ONLY_LINES = ("right_leg_outer", "pelvis_circle")
 DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES]
@@ -129,32 +129,6 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
     return pose
 
 
-def shoulder_heading(image_landmarks, world_landmarks):
-    """Estimate the horizontal direction of the shoulder axis."""
-    if len(world_landmarks) <= 12:
-        return None
-    if not all(float(image_landmarks[i].visibility) >= .60 for i in (11, 12)):
-        return None
-    left, right = world_landmarks[11], world_landmarks[12]
-    dx, dz = float(left.x - right.x), float(left.z - right.z)
-    if not all(map(math.isfinite, (dx, dz))) or math.hypot(dx, dz) < .10:
-        return None
-    return math.atan2(dz, dx)
-
-
-def shoulder_turn(job, phase):
-    headings = []
-    for code in ("P1", phase):
-        pose = job["poses"][job["p_frames"][code]] or {}
-        heading = pose.get("shoulder_heading")
-        if heading is None:
-            return None
-        headings.append(heading)
-    delta = headings[1] - headings[0]
-    signed = math.atan2(math.sin(delta), math.cos(delta))
-    return round(math.degrees(signed) * job.get("target_dir", -1))
-
-
 def analyze_skeleton(path: Path, info: dict, progress=None) -> list:
     # Python側のCPU解析。スマホのWebGL対応には依存しない。
     import mediapipe as mp
@@ -172,15 +146,7 @@ def analyze_skeleton(path: Path, info: dict, progress=None) -> list:
                     break
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 result = detector.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), round(i*1000/info["fps"]))
-                pose = None
-                if result.pose_landmarks:
-                    landmarks = result.pose_landmarks[0]
-                    pose = pose_to_dict(landmarks, info["width"], info["height"])
-                    if result.pose_world_landmarks:
-                        pose["shoulder_heading"] = shoulder_heading(
-                            landmarks, result.pose_world_landmarks[0]
-                        )
-                poses.append(pose)
+                poses.append(pose_to_dict(result.pose_landmarks[0], info["width"], info["height"]) if result.pose_landmarks else None)
                 i += 1
                 if progress and (i % 5 == 0 or i == info["frames"]):
                     progress(min(1., i/max(1,info["frames"])), f"骨格解析 {i} / {info['frames']} コマ")
@@ -433,11 +399,12 @@ def pelvis_circles(job: dict, frame: int, style: dict) -> list:
     base = {**style, "type": "circle", "radius": guides.get("pelvis_radius", .045),
             "anchor": anchor}
     circles = [{**base, "id": "pelvis_reference", "center": anchor,
-                "dash": "dashed", "dx": 0}]
+                "dash": "dashed", "offset": [0, 0]}]
     if origin and current.get("pelvis_visible"):
-        dx = current["hip"][0] - origin[0]
+        offset = [value - start for value, start in zip(current["hip"], origin)]
+        center = [start + delta for start, delta in zip(anchor, offset)]
         circles.append({**base, "id": "pelvis_circle", "dash": "solid",
-                        "center": [anchor[0] + dx, anchor[1]], "dx": dx})
+                        "center": center, "offset": offset})
     return circles
 
 
@@ -524,11 +491,6 @@ def sportsbox_value_color(value: float, bounds: tuple[float, float]) -> str:
 
 def sportsbox_overlay(job: dict, phase: str) -> list[list[list[tuple[str, str]]]]:
     panels = []
-    if job.get("camera_mode") == "front" and job.get("show_shoulder_turn", True):
-        angle = shoulder_turn(job, phase)
-        if angle is not None:
-            value = f"{angle:+d}°" if angle else "0°"
-            panels.append([[("肩の回転（推定）  " + value, "white")]])
     profile = job.get("sportsbox_iron_profile", "male")
     ranges = SPORTSBOX_IRON_RANGES.get(profile, SPORTSBOX_IRON_RANGES["male"])
     angles = job.get("sportsbox_angles", {}).get(phase, {})
@@ -818,7 +780,7 @@ function style(s){ctx.strokeStyle=s.color||'#ffff00';ctx.lineWidth=Math.max(1,(s
 function text(label,p,color,angle=false){ctx.save();ctx.font=`bold ${angle?Math.max(14,canvas.height*26/1080):Math.max(18,canvas.height*.03)}px sans-serif`;ctx.lineWidth=angle?2:3;ctx.strokeStyle='#101c17';ctx.fillStyle=color;ctx.setLineDash([]);const x=clamp(p[0],0,.88)*canvas.width,y=clamp(p[1],.03,.97)*canvas.height;ctx.strokeText(label,x,y);ctx.fillText(label,x,y);ctx.restore();}
 function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaft;s.a=a;s.b=[a[0]+(b[0]-a[0])*2.2,a[1]+(b[1]-a[1])*2.2];s.label_pos=[a[0]+(b[0]-a[0])*.45+.014,a[1]+(b[1]-a[1])*.45+.015];}if(s.id==='hip'){s.a=[g.hip,g.top];s.b=[g.hip,g.bottom];}if(s.id==='vertical'){s.a=[g.vertical,g.top];s.b=[g.vertical,g.bottom];}if(s.id==='back_vertical'){s.a[0]=s.b[0]=g.back_vertical;}if(s.id==='ankles'){s.a=[g.ankles[s.part],g.top];s.b=[g.ankles[s.part],g.bottom];}if(s.id==='pelvis_reference'||s.id==='pelvis_circle'){
     const p=g.pelvis_center||s.anchor;
-    s.center=[p[0]+s.dx,p[1]];
+    s.center=[p[0]+s.offset[0],p[1]+s.offset[1]];
     s.radius=g.pelvis_radius||s.radius;
 }if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='right_leg_outer'&&args.phase==='P1'){s.a=body.right_ankle_outer;s.b=body.right_thigh_outer;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
 function draw(s){ctx.save();style(s);ctx.beginPath();if(s.type==='line'){ctx.moveTo(s.a[0]*canvas.width,s.a[1]*canvas.height);ctx.lineTo(s.b[0]*canvas.width,s.b[1]*canvas.height);}else if(s.type==='circle'&&s.center){ctx.arc(s.center[0]*canvas.width,s.center[1]*canvas.height,s.radius*canvas.width,0,Math.PI*2);}else if(s.type==='free'){s.points.forEach((p,i)=>i?ctx.lineTo(p[0]*canvas.width,p[1]*canvas.height):ctx.moveTo(p[0]*canvas.width,p[1]*canvas.height));}ctx.stroke();ctx.restore();if(s.type==='line'&&s.angle){let a=Math.round(Math.atan2(Math.abs((s.b[1]-s.a[1])*canvas.height),Math.abs((s.b[0]-s.a[0])*canvas.width))*180/Math.PI);if(s.vertical){const dx=(s.b[0]-s.a[0])*canvas.width,dy=(s.b[1]-s.a[1])*canvas.height;a=Math.round(Math.atan2(Math.abs(dx),Math.abs(dy))*180/Math.PI);if(dx*(s.target_dir||-1)<0)a=-a;}text(a+'°',s.label_pos||[(s.a[0]+s.b[0])/2+.014,(s.a[1]+s.b[1])/2-.01],s.color,true);}}
@@ -1800,7 +1762,7 @@ WORKSPACE_SETTINGS = {
     "active_p", "active_line", "camera_mode", "enabled_lines", "styles",
     "show_p1_reference", "target_side", "custom_positions", "show_phase_list",
     "pause_positions", "pause_seconds", "snapshot_positions", "upload_method",
-    "back_vertical_dash_initialized", "swing_handedness", "show_shoulder_turn",
+    "back_vertical_dash_initialized", "swing_handedness",
 }
 
 
@@ -1938,10 +1900,7 @@ def render_app():
         st.caption("線はプレビュー上の丸、またはシャフト・ヒップの線をドラッグして動かせます。")
         if st.session_state["camera_mode"]=="back":
             st.checkbox("P1の胸・腰の基準線（白点線・太さ2）",value=True,key="show_p1_reference",on_change=clear_outputs)
-        if not rear_mode:
-            st.checkbox("肩の回転（推定）を表示", value=True,
-                        key="show_shoulder_turn", on_change=clear_outputs)
-        if "tilt" in enabled or not rear_mode:
+        if "tilt" in enabled:
             st.selectbox("目標方向（画面上）",["左","右"],key="target_side",on_change=clear_outputs,help="胸が腰より目標側なら正、反対側ならマイナスです。")
         custom_positions=st.multiselect("共通の手描き図形を表示するP",P_CODES,default=[],key="custom_positions",help="未選択なら全フレームに表示します。",on_change=clear_outputs)
         with st.expander("読み込みの詳細設定"):
@@ -1990,12 +1949,16 @@ def render_app():
         st.info("動画を選んで「動画を読み込んで解析」を押してください。")
         return
     sportsbox_settings(job)
-    job["camera_mode"] = st.session_state["camera_mode"]
-    if "show_shoulder_turn" not in job:
+    # 旧版で肩の回転が描画された出力は再作成する。
+    if job.pop("show_shoulder_turn", False) and job.get("camera_mode") == "front":
         clear_outputs()
-    job["show_shoulder_turn"] = st.session_state.get("show_shoulder_turn", True)
+    job["camera_mode"] = st.session_state["camera_mode"]
+    if not job.get("pelvis_tracks_both_axes"):
+        if not rear_mode and "pelvis_circle" in enabled:
+            clear_outputs()
+        job["pelvis_tracks_both_axes"] = True
     if not rear_mode and not any(pose and "pelvis_visible" in pose for pose in job["poses"]):
-        st.caption("骨盤の円と肩の回転を表示するには、AI骨格解析を有効にして動画を読み込み直してください。")
+        st.caption("骨盤の円を表示するには、AI骨格解析を有効にして動画を読み込み直してください。")
     if "back_vertical" not in job["guides"]:
         reference = get_pose(job, job["p_frames"]["P1"], "P1")
         job["guides"]["back_vertical"] = rear_reference_x(reference)
@@ -2045,7 +2008,7 @@ def render_app():
     if line == "hip_right_knee":
         st.caption("後方撮影のP1だけに表示します。P1で腰側とひざ側の丸をドラッグして調整できます。")
     if line == "pelvis_circle":
-        st.caption("点線はP1の骨盤中心、実線は同じ高さで横方向だけ追従します。P1で丸の位置と大きさを調整できます。")
+        st.caption("点線はP1の骨盤中心、実線は骨盤中心の上下左右の動きに追従します。P1で丸の位置と大きさを調整できます。")
     if line == "right_leg_outer":
         st.caption("P1の外くるぶしと太ももの付け根を結び、同じ位置・角度でP4まで表示します。P1で両端の丸をドラッグして調整できます。角度の基準は画面の水平線（0°）です。")
     with st.expander("点線・表示するPを変更"):
