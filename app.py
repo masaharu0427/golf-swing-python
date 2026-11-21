@@ -721,12 +721,14 @@ def accept_editor_event(job: dict,event: dict | None,phase: str,frame: int) -> b
         for name in ["hip","vertical","back_vertical","top","bottom","radius"]:
             value=g.get(name)
             if isinstance(value,(float,int)) and math.isfinite(value) and 0<=value<=1:job["guides"][name]=value;changed=True
-        if phase == "P1" and valid_point(g.get("pelvis_center")):
-            job["guides"]["pelvis_center"] = g["pelvis_center"]
+        if job.get("camera_mode") == "front":
+            if valid_point(g.get("pelvis_center")):
+                job["guides"]["pelvis_center"] = g["pelvis_center"]
+                changed = True
             radius = g.get("pelvis_radius")
             if isinstance(radius, (int, float)) and .01 <= radius <= .25:
                 job["guides"]["pelvis_radius"] = radius
-            changed = True
+                changed = True
         if valid_point(g.get("head")):job["guides"]["head"]=g["head"];changed=True
         if isinstance(g.get("shaft"),list) and len(g["shaft"])==2 and all(valid_point(p) for p in g["shaft"]):job["guides"]["shaft"]=g["shaft"];changed=True
         if isinstance(g.get("ankles"),list) and len(g["ankles"])==2 and all(isinstance(v,(float,int)) and math.isfinite(v) and 0<=v<=1 for v in g["ankles"]):job["guides"]["ankles"]=g["ankles"];changed=True
@@ -785,11 +787,12 @@ function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaf
 }if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='right_leg_outer'&&args.phase==='P1'){s.a=body.right_ankle_outer;s.b=body.right_thigh_outer;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
 function draw(s){ctx.save();style(s);ctx.beginPath();if(s.type==='line'){ctx.moveTo(s.a[0]*canvas.width,s.a[1]*canvas.height);ctx.lineTo(s.b[0]*canvas.width,s.b[1]*canvas.height);}else if(s.type==='circle'&&s.center){ctx.arc(s.center[0]*canvas.width,s.center[1]*canvas.height,s.radius*canvas.width,0,Math.PI*2);}else if(s.type==='free'){s.points.forEach((p,i)=>i?ctx.lineTo(p[0]*canvas.width,p[1]*canvas.height):ctx.moveTo(p[0]*canvas.width,p[1]*canvas.height));}ctx.stroke();ctx.restore();if(s.type==='line'&&s.angle){let a=Math.round(Math.atan2(Math.abs((s.b[1]-s.a[1])*canvas.height),Math.abs((s.b[0]-s.a[0])*canvas.width))*180/Math.PI);if(s.vertical){const dx=(s.b[0]-s.a[0])*canvas.width,dy=(s.b[1]-s.a[1])*canvas.height;a=Math.round(Math.atan2(Math.abs(dx),Math.abs(dy))*180/Math.PI);if(dx*(s.target_dir||-1)<0)a=-a;}text(a+'°',s.label_pos||[(s.a[0]+s.b[0])/2+.014,(s.a[1]+s.b[1])/2-.01],s.color,true);}}
 function handles(){const out=[],shown=id=>args.primitives.some(s=>s.id===id);const add=(p,type,key,extra={})=>{if(p)out.push({p,type,key,...extra});};if(shown('shaft'))g.shaft.forEach((p,i)=>add(p,'shaft',i,{label:i===0?'ヘッド側':'グリップ側',color:i===0?'#58d6ef':'#e9f38a'}));if(shown('hip'))add([g.hip,(g.top+g.bottom)/2],'hip',null,{label:'ヒップ',color:'#ffbf69'});
-if(args.active_line==='pelvis_circle'&&args.phase==='P1'){
-    const reference=args.primitives.find(s=>s.id==='pelvis_reference');
-    if(reference){
-        const s=geometry(reference);
-        add(s.center,'pelvisCenter',null,{color:s.color});
+if(args.active_line==='pelvis_circle'){
+    const circle=args.primitives.find(s=>s.id==='pelvis_circle')
+        || args.primitives.find(s=>s.id==='pelvis_reference');
+    if(circle){
+        const s=geometry(circle);
+        add(s.center,'pelvisCenter',null,{offset:s.offset,color:s.color});
         add([s.center[0]+s.radius,s.center[1]],'pelvisRadius',null,
             {center:s.center,color:s.color});
     }
@@ -846,9 +849,9 @@ function translate(pts,delta){const dx=clamp(delta[0],-Math.min(...pts.map(p=>p[
 let activePointer=null;
 canvas.addEventListener('pointerdown',e=>{if(!args||args.disabled||activePointer!==null||!e.isPrimary||e.button!==0)return;activePointer=e.pointerId;const p=pos(e);canvas.setPointerCapture(e.pointerId);if(tool==='move'){drag=hit(p);if(drag){remember();drag.last=p;$('saved').textContent='調整中…';}}else{remember();const base={color:$('color').value,width:Number($('width').value),dash:$('dash').value,target_p:$('bind').checked?args.phase:null};if(tool==='line')active={type:'line',a:p,b:[...p],angle:$('angle').checked,...base};if(tool==='circle')active={type:'circle',center:p,radius:.001,...base};if(tool==='free')active={type:'free',points:[p],...base};}e.preventDefault();});
 canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'||d.type==='back_vertical'){g[d.type]=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='pelvisCenter'){
-    g.pelvis_center=p;changedG=true;
+    g.pelvis_center=p.map((value,i)=>clamp(value-d.offset[i]));
+    changedG=true;
 }else if(d.type==='pelvisRadius'){
-    g.pelvis_center=d.center;
     g.pelvis_radius=clamp(Math.hypot((p[0]-d.center[0])*canvas.width,
         (p[1]-d.center[1])*canvas.height)/canvas.width,.01,.25);
     changedG=true;
@@ -978,6 +981,12 @@ def clear_outputs():
 def switch_mode(front=False):
     st.session_state["camera_mode"]="front" if front else "back"
     st.session_state["enabled_lines"]=(FRONT_DEFAULT_LINES if front else DEFAULT_LINES)[:]
+    st.session_state.pop(f"line_visibility_{st.session_state['camera_mode']}", None)
+    clear_outputs()
+
+
+def store_line_selection(widget_key: str) -> None:
+    st.session_state["enabled_lines"] = list(st.session_state[widget_key])
     clear_outputs()
 
 
@@ -1760,6 +1769,7 @@ post('streamlit:setFrameHeight',{height:0});
 
 WORKSPACE_SETTINGS = {
     "active_p", "active_line", "camera_mode", "enabled_lines", "styles",
+    "line_visibility_recovered",
     "show_p1_reference", "target_side", "custom_positions", "show_phase_list",
     "pause_positions", "pause_seconds", "snapshot_positions", "upload_method",
     "back_vertical_dash_initialized", "swing_handedness",
@@ -1868,7 +1878,8 @@ def render_app():
     if "camera_mode" not in st.session_state:st.session_state["camera_mode"]="back"
     styles = st.session_state.setdefault("styles", {})
     rear_mode = st.session_state["camera_mode"] == "back"
-    st.session_state.setdefault("enabled_lines", (DEFAULT_LINES if rear_mode else FRONT_DEFAULT_LINES)[:])
+    default_lines = DEFAULT_LINES if rear_mode else FRONT_DEFAULT_LINES
+    st.session_state.setdefault("enabled_lines", default_lines[:])
     if styles and "back_vertical" not in styles and rear_mode:
         current_lines = st.session_state["enabled_lines"]
         st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, *REAR_ONLY_LINES]))
@@ -1896,7 +1907,20 @@ def render_app():
         b.button("正面撮影",on_click=switch_mode,args=(True,),use_container_width=True)
         unavailable = FRONT_ONLY_LINES if rear_mode else REAR_ONLY_LINES
         available = [key for key in LINE_NAMES if key not in unavailable]
-        enabled=st.multiselect("表示する線",available,format_func=lambda k:LINE_NAMES[k],key="enabled_lines",on_change=clear_outputs)
+        selected = [line for line in st.session_state["enabled_lines"] if line in available]
+        if not st.session_state.get("line_visibility_recovered"):
+            if not selected:
+                selected = default_lines[:]
+                clear_outputs()
+            st.session_state["line_visibility_recovered"] = True
+        widget_key = f"line_visibility_{st.session_state['camera_mode']}"
+        enabled = st.multiselect(
+            "表示する線", available, default=selected,
+            format_func=LINE_NAMES.__getitem__, key=widget_key,
+            placeholder="表示する線を選択", on_change=store_line_selection, args=(widget_key,),
+        )
+        st.session_state["enabled_lines"] = list(enabled)
+        st.button("標準の線に戻す", on_click=switch_mode, args=(not rear_mode,))
         st.caption("線はプレビュー上の丸、またはシャフト・ヒップの線をドラッグして動かせます。")
         if st.session_state["camera_mode"]=="back":
             st.checkbox("P1の胸・腰の基準線（白点線・太さ2）",value=True,key="show_p1_reference",on_change=clear_outputs)
@@ -2008,7 +2032,7 @@ def render_app():
     if line == "hip_right_knee":
         st.caption("後方撮影のP1だけに表示します。P1で腰側とひざ側の丸をドラッグして調整できます。")
     if line == "pelvis_circle":
-        st.caption("点線はP1の骨盤中心、実線は骨盤中心の上下左右の動きに追従します。P1で丸の位置と大きさを調整できます。")
+        st.caption("点線はP1の基準、実線は骨盤中心に追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
     if line == "right_leg_outer":
         st.caption("P1の外くるぶしと太ももの付け根を結び、同じ位置・角度でP4まで表示します。P1で両端の丸をドラッグして調整できます。角度の基準は画面の水平線（0°）です。")
     with st.expander("点線・表示するPを変更"):
