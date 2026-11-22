@@ -34,7 +34,7 @@ COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0
 LINE_NAMES["right_leg_outer"] = "右脚の外側（P1基準線）"
 COLORS["right_leg_outer"] = "#1BC4D4"
 REAR_ONLY_LINES = ("back_vertical", "hip_right_knee")
-LINE_NAMES["pelvis_circle"] = "骨盤中心の左右の動き（円）"
+LINE_NAMES["pelvis_circle"] = "骨盤中心の左右・上下の動き（円）"
 COLORS["pelvis_circle"] = "#FF9500"
 LINE_NAMES["right_knee_circle"] = "右ひざの左右・上下の動き（円）"
 COLORS["right_knee_circle"] = "#CE83FF"
@@ -130,9 +130,10 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
         for key, point_xy, factor in zip(RIGHT_LEG_POINTS, (right_ankle, right_hip), (.08, .22)):
             x, y = point_xy
             pose[key] = [min(1., max(0., x + outward * span * factor)), y]
-    pose["pelvis_visible"] = (
-        all(float(lm[i].visibility) >= .55 for i in (23, 24))
-        and all(valid_point(point) for point in (left_hip, right_hip))
+    # The midpoint is reliable only when both hip landmarks can be seen.
+    pose["pelvis_confidence"] = min(float(lm[i].visibility) for i in (23, 24))
+    pose["pelvis_visible"] = pose["pelvis_confidence"] >= .55 and all(
+        valid_point(hip) for hip in (left_hip, right_hip)
     )
     for guide, (key, landmark) in KNEE_LANDMARKS.items():
         coordinates = point(landmark)
@@ -460,13 +461,65 @@ def tracked_sway_point(poses: list, frame: int, fps: float, guide: str, point: s
     return position
 
 
+def build_pelvis_track(poses: list, info: dict) -> list:
+    """Track the projected hip midpoint using reliable samples on both sides of a frame."""
+    centers = np.full((len(poses), 2), np.nan)
+    confidence = np.zeros(len(poses))
+    for index, pose in enumerate(poses):
+        if pose and pose.get("pelvis_visible") and valid_point(pose.get("hip")):
+            centers[index] = pose["hip"]
+            confidence[index] = pose.get("pelvis_confidence", .75)
+
+    fps = info["fps"]
+    if fps >= 24 and len(poses) >= 3:
+        # Reject isolated jumps per axis, measuring the threshold in equal pixel units.
+        scale = np.array([info["width"] / info["height"], 1.])
+        before, after = centers[:-2], centers[2:]
+        midpoint = (before + after) / 2
+        jump = np.abs(centers[1:-1] - midpoint) * scale
+        motion = np.abs(after - before) * scale
+        corrected = centers.copy()
+        corrected[1:-1] = np.where(jump > np.maximum(.006, .75 * motion), midpoint, centers[1:-1])
+
+        # A symmetric filter avoids lag and gives high-confidence detections more weight.
+        midpoint = (corrected[:-2] + corrected[2:]) / 2
+        neighbors = np.isfinite(midpoint).all(axis=1) & np.isfinite(corrected[1:-1]).all(axis=1)
+        weight = (.20 + .35 * (1 - confidence[1:-1]))[neighbors, None]
+        centers = corrected.copy()
+        interior = centers[1:-1]
+        measured = interior[neighbors]
+        interior[neighbors] = measured + weight * (midpoint[neighbors] - measured)
+
+    # Recover short occlusions only when tracked points bracket the missing section.
+    observed = np.flatnonzero(np.isfinite(centers[:, 0]))
+    max_missing = max(1, round(.13 * fps))
+    for start, end in zip(observed[:-1], observed[1:]):
+        if 1 < end - start <= max_missing + 1:
+            centers[start + 1:end] = np.linspace(centers[start], centers[end], end - start + 1)[1:-1]
+
+    return [center.tolist() if np.isfinite(center).all() else None for center in centers]
+
+
+def pelvis_track(job: dict) -> list:
+    track = job.get("pelvis_track")
+    if track is None:
+        track = job["pelvis_track"] = build_pelvis_track(job["poses"], job["info"])
+    return track
+
+
 def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
     guide, point, default_radius = SWAY_CIRCLE_POINTS[code]
     poses = job["poses"]
     reference_frame = job["p_frames"]["P1"]
     fps = job["info"]["fps"]
-    reference = tracked_sway_point(poses, reference_frame, fps, guide, point)
-    origin = sway_point(poses, reference_frame, guide, point) or reference
+    if guide == "pelvis":
+        track = pelvis_track(job)
+        reference = origin = track[reference_frame] if 0 <= reference_frame < len(track) else None
+        current = track[frame] if 0 <= frame < len(track) else None
+    else:
+        reference = tracked_sway_point(poses, reference_frame, fps, guide, point)
+        origin = sway_point(poses, reference_frame, guide, point) or reference
+        current = tracked_sway_point(poses, frame, fps, guide, point)
     guides = job["guides"]
     anchor = guides.get(f"{guide}_center") or origin
     if anchor is None:
@@ -475,9 +528,8 @@ def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
             "anchor": anchor, "sway_guide": guide}
     circles = [{**base, "id": f"{guide}_reference", "center": anchor,
                 "dash": "dashed", "offset": [0, 0]}]
-    current = tracked_sway_point(poses, frame, fps, guide, point)
     if reference is not None and current is not None:
-        offset = [current[0] - reference[0], current[1] - reference[1] if guide in KNEE_LANDMARKS else 0]
+        offset = [value - baseline for value, baseline in zip(current, reference)]
         center = [start + delta for start, delta in zip(anchor, offset)]
         circles.append({**base, "id": code, "dash": "solid", "center": center, "offset": offset})
     return circles
@@ -1114,6 +1166,7 @@ def refresh_pose_points(job: dict, keys: tuple, progress) -> int:
                 if key in pose:
                     body.setdefault(key, pose[key])
     if updates:
+        job.pop("pelvis_track", None)
         clear_outputs()
     return updates
 
@@ -1929,7 +1982,7 @@ def save_workspace() -> None:
     }
     settings = {key: state[key] for key in keys if key in state}
     saved_job = {key: value for key, value in job.items()
-                 if key not in {"sportsbox_upload", "sportsbox_sway_upload", "sportsbox_sway_upload_2", "output_images"}}
+                 if key not in {"sportsbox_upload", "sportsbox_sway_upload", "sportsbox_sway_upload_2", "output_images", "pelvis_track"}}
     payload = json.dumps({"job": saved_job, "settings": settings}, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha256(payload.encode()).hexdigest()
     if digest == state.get("workspace_digest"):
@@ -2076,10 +2129,10 @@ def render_app():
     if job.pop("show_shoulder_turn", False) and job.get("camera_mode") == "front":
         clear_outputs()
     job["camera_mode"] = st.session_state["camera_mode"]
-    if not job.get("pelvis_horizontal_tracking"):
+    if not job.get("pelvis_vertical_tracking"):
         if not rear_mode and "pelvis_circle" in enabled:
             clear_outputs()
-        job["pelvis_horizontal_tracking"] = True
+        job["pelvis_vertical_tracking"] = True
     if not job.get("knee_vertical_tracking"):
         if not rear_mode and any(f"{guide}_circle" in enabled for guide in KNEE_LANDMARKS):
             clear_outputs()
@@ -2144,7 +2197,9 @@ def render_app():
         if tracked_sway_point(job["poses"], job["p_frames"]["P1"], job["info"]["fps"], guide, point) is None:
             st.caption(f"P1で{knee}を検出できません。{knee}が見えるコマにP1を調整してください。")
     if line == "pelvis_circle":
-        st.caption("点線はP1の基準、実線は同じ高さで骨盤中心の左右の動きに追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
+        st.caption("点線はP1の基準です。実線は骨盤中心の左右・上下の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
+        if pelvis_track(job)[job["p_frames"]["P1"]] is None:
+            st.caption("P1で骨盤の位置を確認できません。左右の腰が見えるコマにP1を調整してください。")
     if line == "right_leg_outer":
         st.caption("P1の外くるぶしと太ももの付け根を結び、同じ位置・角度でP4まで表示します。P1で両端の丸をドラッグして調整できます。角度の基準は画面の水平線（0°）です。")
     with st.expander("点線・表示するPを変更"):
@@ -2174,6 +2229,8 @@ def render_app():
         body=get_pose(job,frame_index,code)
         if code == "P1" and (reference := right_leg_reference(job)):
             body = {**(body or {}), **dict(zip(RIGHT_LEG_POINTS, reference))}
+        if "pelvis_circle" in enabled:
+            pelvis_track(job)
         component=editor_component()
         event=component(image=base64.b64encode(jpg).decode(),width=info["width"],height=info["height"],scene=f"{job['token']}:{code}:{frame_index}",phase=code,frame=frame_index,guides=job["guides"],body=body,primitives=primitives_for({**job,"shapes":[]},frame_index,cfg,code,custom_positions),shapes=job["shapes"],active_line=line,custom_visible=in_positions(frame_index,custom_positions,job["p_frames"]),sportsbox=sportsbox_overlay(job,code),restore_view=st.session_state.get("restore_view"),ack=job["last_event"],key=f"editor_{job['token']}",default=None)
         next_phase=editor_phase_change(job,event,code,frame_index)
