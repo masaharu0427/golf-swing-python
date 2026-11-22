@@ -36,7 +36,11 @@ COLORS["right_leg_outer"] = "#1BC4D4"
 REAR_ONLY_LINES = ("back_vertical", "hip_right_knee")
 LINE_NAMES["pelvis_circle"] = "骨盤中心の左右の動き（円）"
 COLORS["pelvis_circle"] = "#FF9500"
-FRONT_ONLY_LINES = ("right_leg_outer", "pelvis_circle")
+LINE_NAMES["right_knee_circle"] = "右ひざの左右の動き（Sway）"
+COLORS["right_knee_circle"] = "#CE83FF"
+SWAY_CIRCLE_POINTS = {"pelvis_circle": ("pelvis", "hip", .045),
+                      "right_knee_circle": ("right_knee", "rk", .035)}
+FRONT_ONLY_LINES = ("right_leg_outer", *SWAY_CIRCLE_POINTS)
 DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES]
 FRONT_DEFAULT_LINES = ["head", "tilt", "shoulders", "ankles", *FRONT_ONLY_LINES]
 RIGHT_LEG_POINTS = ("right_ankle_outer", "right_thigh_outer")
@@ -126,6 +130,7 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
         all(float(lm[i].visibility) >= .55 for i in (23, 24))
         and all(valid_point(point) for point in (left_hip, right_hip))
     )
+    pose["right_knee_visible"] = float(lm[26].visibility) >= .55 and valid_point(pose["rk"])
     return pose
 
 
@@ -387,18 +392,27 @@ def right_leg_reference(job: dict) -> tuple[list, list] | None:
     return None
 
 
-def pelvis_x(poses: list, frame: int, fps: float) -> float | None:
-    pose = poses[frame] or {}
-    if not pose.get("pelvis_visible"):
+def sway_point(poses: list, frame: int, guide: str, point: str) -> list | None:
+    pose = poses[frame] if 0 <= frame < len(poses) else None
+    if not pose or not pose.get(f"{guide}_visible", guide == "right_knee"):
         return None
-    x = pose["hip"][0]
-    if fps < 24 or not 0 < frame < len(poses) - 1:
+    coordinates = pose.get(point)
+    return coordinates if valid_point(coordinates) else None
+
+
+def sway_x(poses: list, frame: int, fps: float, guide: str, point: str) -> float | None:
+    current = sway_point(poses, frame, guide, point)
+    if current is None:
+        return None
+    x = current[0]
+    if fps < 24:
         return x
 
-    previous, following = poses[frame - 1] or {}, poses[frame + 1] or {}
-    if not (previous.get("pelvis_visible") and following.get("pelvis_visible")):
+    previous = sway_point(poses, frame - 1, guide, point)
+    following = sway_point(poses, frame + 1, guide, point)
+    if previous is None or following is None:
         return x
-    left, right = sorted((previous["hip"][0], following["hip"][0]))
+    left, right = sorted((previous[0], following[0]))
     nearest_jump = max(left - x, x - right, 0)
     # Correct only a pronounced one-frame excursion when the neighbors agree.
     if nearest_jump >= .01 and nearest_jump >= 2 * (right - left):
@@ -406,27 +420,26 @@ def pelvis_x(poses: list, frame: int, fps: float) -> float | None:
     return x
 
 
-def pelvis_circles(job: dict, frame: int, style: dict) -> list:
+def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
+    guide, point, default_radius = SWAY_CIRCLE_POINTS[code]
     poses = job["poses"]
     reference_frame = job["p_frames"]["P1"]
-    reference = poses[reference_frame] or {}
-    origin = reference["hip"] if reference.get("pelvis_visible") else None
+    origin = sway_point(poses, reference_frame, guide, point)
     guides = job["guides"]
-    anchor = guides.get("pelvis_center") or origin
+    anchor = guides.get(f"{guide}_center") or origin
     if anchor is None:
         return []
-    base = {**style, "type": "circle", "radius": guides.get("pelvis_radius", .045),
-            "anchor": anchor}
-    circles = [{**base, "id": "pelvis_reference", "center": anchor,
+    base = {**style, "type": "circle", "radius": guides.get(f"{guide}_radius", default_radius),
+            "anchor": anchor, "sway_guide": guide}
+    circles = [{**base, "id": f"{guide}_reference", "center": anchor,
                 "dash": "dashed", "offset": [0, 0]}]
     fps = job["info"]["fps"]
-    current_x = pelvis_x(poses, frame, fps)
+    current_x = sway_x(poses, frame, fps, guide, point)
     if origin is not None and current_x is not None:
-        reference_x = pelvis_x(poses, reference_frame, fps)
+        reference_x = sway_x(poses, reference_frame, fps, guide, point)
         offset = [current_x - reference_x, 0]
         center = [start + delta for start, delta in zip(anchor, offset)]
-        circles.append({**base, "id": "pelvis_circle", "dash": "solid",
-                        "center": center, "offset": offset})
+        circles.append({**base, "id": code, "dash": "solid", "center": center, "offset": offset})
     return circles
 
 
@@ -454,8 +467,8 @@ def primitives_for(job: dict, frame: int, cfg: dict, phase: str | None = None, c
                 delta=[body["head"][i]-origin[i] for i in range(2)]
                 center=[g["head"][i]+delta[i] for i in range(2)]
                 out.append({**s,"type":"circle","id":code,"center":center,"radius":g["radius"],"head_delta":delta})
-        elif code == "pelvis_circle":
-            out.extend(pelvis_circles(job, frame, s))
+        elif code in SWAY_CIRCLE_POINTS:
+            out.extend(sway_circles(job, frame, s, code))
         elif code in ("spine","tilt") and body:
             if code=="tilt":
                 out.append({"type":"line","id":"tilt_zero","a":body["hip"][:],"b":[body["hip"][0],body["sh"][1]],"angle":False,"color":"#FFFFFF","width":2,"dash":"dashed"})
@@ -744,13 +757,16 @@ def accept_editor_event(job: dict,event: dict | None,phase: str,frame: int) -> b
             value=g.get(name)
             if isinstance(value,(float,int)) and math.isfinite(value) and 0<=value<=1:job["guides"][name]=value;changed=True
         if job.get("camera_mode") == "front":
-            if valid_point(g.get("pelvis_center")):
-                job["guides"]["pelvis_center"] = g["pelvis_center"]
-                changed = True
-            radius = g.get("pelvis_radius")
-            if isinstance(radius, (int, float)) and .01 <= radius <= .25:
-                job["guides"]["pelvis_radius"] = radius
-                changed = True
+            for guide, _, _ in SWAY_CIRCLE_POINTS.values():
+                center_key = f"{guide}_center"
+                radius_key = f"{guide}_radius"
+                if valid_point(g.get(center_key)):
+                    job["guides"][center_key] = g[center_key]
+                    changed = True
+                radius = g.get(radius_key)
+                if isinstance(radius, (int, float)) and .01 <= radius <= .25:
+                    job["guides"][radius_key] = radius
+                    changed = True
         if valid_point(g.get("head")):job["guides"]["head"]=g["head"];changed=True
         if isinstance(g.get("shaft"),list) and len(g["shaft"])==2 and all(valid_point(p) for p in g["shaft"]):job["guides"]["shaft"]=g["shaft"];changed=True
         if isinstance(g.get("ankles"),list) and len(g["ankles"])==2 and all(isinstance(v,(float,int)) and math.isfinite(v) and 0<=v<=1 for v in g["ankles"]):job["guides"]["ankles"]=g["ankles"];changed=True
@@ -802,20 +818,21 @@ function height(){const h=Math.ceil($('root').getBoundingClientRect().height)+8;
 function visible(s){return s.target_p?s.target_p===args.phase:args.custom_visible!==false;}
 function style(s){ctx.strokeStyle=s.color||'#ffff00';ctx.lineWidth=Math.max(1,(s.width||3)*canvas.height/1080);ctx.lineCap=s.dash==='dashed'?'butt':'round';ctx.lineJoin='round';const dash=Math.max(2,4*canvas.height/1080);ctx.setLineDash(s.dash==='dashed'?[dash,dash]:[]);}
 function text(label,p,color,angle=false){ctx.save();ctx.font=`bold ${angle?Math.max(14,canvas.height*26/1080):Math.max(18,canvas.height*.03)}px sans-serif`;ctx.lineWidth=angle?2:3;ctx.strokeStyle='#101c17';ctx.fillStyle=color;ctx.setLineDash([]);const x=clamp(p[0],0,.88)*canvas.width,y=clamp(p[1],.03,.97)*canvas.height;ctx.strokeText(label,x,y);ctx.fillText(label,x,y);ctx.restore();}
-function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaft;s.a=a;s.b=[a[0]+(b[0]-a[0])*2.2,a[1]+(b[1]-a[1])*2.2];s.label_pos=[a[0]+(b[0]-a[0])*.45+.014,a[1]+(b[1]-a[1])*.45+.015];}if(s.id==='hip'){s.a=[g.hip,g.top];s.b=[g.hip,g.bottom];}if(s.id==='vertical'){s.a=[g.vertical,g.top];s.b=[g.vertical,g.bottom];}if(s.id==='back_vertical'){s.a[0]=s.b[0]=g.back_vertical;}if(s.id==='ankles'){s.a=[g.ankles[s.part],g.top];s.b=[g.ankles[s.part],g.bottom];}if(s.id==='pelvis_reference'||s.id==='pelvis_circle'){
-    const p=g.pelvis_center||s.anchor;
+function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaft;s.a=a;s.b=[a[0]+(b[0]-a[0])*2.2,a[1]+(b[1]-a[1])*2.2];s.label_pos=[a[0]+(b[0]-a[0])*.45+.014,a[1]+(b[1]-a[1])*.45+.015];}if(s.id==='hip'){s.a=[g.hip,g.top];s.b=[g.hip,g.bottom];}if(s.id==='vertical'){s.a=[g.vertical,g.top];s.b=[g.vertical,g.bottom];}if(s.id==='back_vertical'){s.a[0]=s.b[0]=g.back_vertical;}if(s.id==='ankles'){s.a=[g.ankles[s.part],g.top];s.b=[g.ankles[s.part],g.bottom];}if(s.sway_guide){
+    const p=g[s.sway_guide+'_center']||s.anchor;
     s.center=[p[0]+s.offset[0],p[1]+s.offset[1]];
-    s.radius=g.pelvis_radius||s.radius;
+    s.radius=g[s.sway_guide+'_radius']||s.radius;
 }if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='right_leg_outer'&&args.phase==='P1'){s.a=body.right_ankle_outer;s.b=body.right_thigh_outer;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
 function draw(s){ctx.save();style(s);ctx.beginPath();if(s.type==='line'){ctx.moveTo(s.a[0]*canvas.width,s.a[1]*canvas.height);ctx.lineTo(s.b[0]*canvas.width,s.b[1]*canvas.height);}else if(s.type==='circle'&&s.center){ctx.arc(s.center[0]*canvas.width,s.center[1]*canvas.height,s.radius*canvas.width,0,Math.PI*2);}else if(s.type==='free'){s.points.forEach((p,i)=>i?ctx.lineTo(p[0]*canvas.width,p[1]*canvas.height):ctx.moveTo(p[0]*canvas.width,p[1]*canvas.height));}ctx.stroke();ctx.restore();if(s.type==='line'&&s.angle){let a=Math.round(Math.atan2(Math.abs((s.b[1]-s.a[1])*canvas.height),Math.abs((s.b[0]-s.a[0])*canvas.width))*180/Math.PI);if(s.vertical){const dx=(s.b[0]-s.a[0])*canvas.width,dy=(s.b[1]-s.a[1])*canvas.height;a=Math.round(Math.atan2(Math.abs(dx),Math.abs(dy))*180/Math.PI);if(dx*(s.target_dir||-1)<0)a=-a;}text(a+'°',s.label_pos||[(s.a[0]+s.b[0])/2+.014,(s.a[1]+s.b[1])/2-.01],s.color,true);}}
 function handles(){const out=[],shown=id=>args.primitives.some(s=>s.id===id);const add=(p,type,key,extra={})=>{if(p)out.push({p,type,key,...extra});};if(shown('shaft'))g.shaft.forEach((p,i)=>add(p,'shaft',i,{label:i===0?'ヘッド側':'グリップ側',color:i===0?'#58d6ef':'#e9f38a'}));if(shown('hip'))add([g.hip,(g.top+g.bottom)/2],'hip',null,{label:'ヒップ',color:'#ffbf69'});
-if(args.active_line==='pelvis_circle'){
-    const circle=args.primitives.find(s=>s.id==='pelvis_circle')
-        || args.primitives.find(s=>s.id==='pelvis_reference');
+const swayGuide={pelvis_circle:'pelvis',right_knee_circle:'right_knee'}[args.active_line];
+if(swayGuide){
+    const circle=args.primitives.find(s=>s.id===args.active_line)
+        || args.primitives.find(s=>s.sway_guide===swayGuide);
     if(circle){
         const s=geometry(circle);
-        add(s.center,'pelvisCenter',null,{offset:s.offset,color:s.color});
-        add([s.center[0]+s.radius,s.center[1]],'pelvisRadius',null,
+        add(s.center,'swayCenter',swayGuide+'_center',{offset:s.offset,color:s.color});
+        add([s.center[0]+s.radius,s.center[1]],'swayRadius',swayGuide+'_radius',
             {center:s.center,color:s.color});
     }
 }if(args.active_line==='head'&&shown('head_reference')&&g.head){add(g.head,'head');add([g.head[0]+g.radius,g.head[1]],'radius');}if(args.active_line==='vertical'&&shown('vertical'))add([g.vertical,(g.top+g.bottom)/2],'vertical');if(args.active_line==='back_vertical'&&shown('back_vertical')){const s=args.primitives.find(p=>p.id==='back_vertical');add([g.back_vertical,(s.a[1]+s.b[1])/2],'back_vertical');}if(args.active_line==='ankles'&&shown('ankles'))g.ankles.forEach((x,i)=>add([x,(g.top+g.bottom)/2],'ankles',i));
@@ -881,11 +898,11 @@ canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag
     Object.assign(body,{hip,sh,ls,rs});
     d.last=p;
     changedB=true;
-}else if(d.type==='pelvisCenter'){
-    g.pelvis_center=p.map((value,i)=>clamp(value-d.offset[i]));
+}else if(d.type==='swayCenter'){
+    g[d.key]=p.map((value,i)=>clamp(value-d.offset[i]));
     changedG=true;
-}else if(d.type==='pelvisRadius'){
-    g.pelvis_radius=clamp(Math.hypot((p[0]-d.center[0])*canvas.width,
+}else if(d.type==='swayRadius'){
+    g[d.key]=clamp(Math.hypot((p[0]-d.center[0])*canvas.width,
         (p[1]-d.center[1])*canvas.height)/canvas.width,.01,.25);
     changedG=true;
 }else if(d.type==='head'){g.head=p;changedG=true;}else if(d.type==='radius'){g.radius=clamp(Math.hypot((p[0]-g.head[0])*canvas.width,(p[1]-g.head[1])*canvas.height)/canvas.width,.01,.25);changedG=true;}else if(d.type==='body'){if(d.key==='sh'){const delta=[p[0]-body.sh[0],p[1]-body.sh[1]];body.ls=[clamp(body.ls[0]+delta[0]),clamp(body.ls[1]+delta[1])];body.rs=[clamp(body.rs[0]+delta[0]),clamp(body.rs[1]+delta[1])];}body[d.key]=p;if(['ls','rs'].includes(d.key))body.sh=[(body.ls[0]+body.rs[0])/2,(body.ls[1]+body.rs[1])/2];changedB=true;}else if(d.type==='custom'){const s=shapes[d.key];if(d.end==='radius')s.radius=clamp(Math.hypot((p[0]-s.center[0])*canvas.width,(p[1]-s.center[1])*canvas.height)/canvas.width,.003,2);else if(d.end==='free'){s.points=translate(s.points,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;}else s[d.end]=p;changedS=true;}}
@@ -1026,7 +1043,8 @@ def store_line_selection(widget_key: str) -> None:
 def frame_change(code,widget):
     job=st.session_state["job"];job["p_frames"][code]=int(st.session_state[widget]);job["body_overrides"].pop(code,None)
     if code == "P1":
-        job["guides"].pop("pelvis_center", None)
+        for guide, _, _ in SWAY_CIRCLE_POINTS.values():
+            job["guides"].pop(f"{guide}_center", None)
     if code=="P1" and not job.get("guides_manual"):
         ref=job["poses"][job["p_frames"][code]]
         if ref:job["guides"]=initial_guides(ref,job["info"])
@@ -2066,12 +2084,16 @@ def render_app():
                     progress.empty()
     if line == "hip_right_knee":
         st.caption("後方撮影のP1だけに表示します。P1で腰側とひざ側の丸をドラッグして調整できます。")
+    if line == "right_knee_circle":
+        st.caption("点線はP1の基準です。実線は高さを固定し、右ひざの左右の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
+        if sway_point(job["poses"], job["p_frames"]["P1"], "right_knee", "rk") is None:
+            st.caption("P1で右ひざを検出できません。右ひざが見えるコマにP1を調整してください。")
     if line == "pelvis_circle":
         st.caption("点線はP1の基準、実線は同じ高さで骨盤中心の左右の動きに追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
     if line == "right_leg_outer":
         st.caption("P1の外くるぶしと太ももの付け根を結び、同じ位置・角度でP4まで表示します。P1で両端の丸をドラッグして調整できます。角度の基準は画面の水平線（0°）です。")
     with st.expander("点線・表示するPを変更"):
-        if line != "pelvis_circle":
+        if line not in SWAY_CIRCLE_POINTS:
             style["dash"]=st.selectbox("種類",["solid","dashed"],index=["solid","dashed"].index(style["dash"]),format_func=lambda x:"実線" if x=="solid" else "点線",key=f"dash_{line}",on_change=clear_outputs)
         if line not in ("shoulders", "right_leg_outer", "hip_right_knee"):
             style["positions"]=st.multiselect("この線を表示するポジション（複数選択可）",P_CODES,default=style["positions"],key=f"positions_{line}",help="未選択なら全フレームに表示します。",on_change=clear_outputs)
