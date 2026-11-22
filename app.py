@@ -400,10 +400,42 @@ def sway_point(poses: list, frame: int, guide: str, point: str) -> list | None:
     return coordinates if valid_point(coordinates) else None
 
 
+def right_knee_fallback(poses: list, frame: int, fps: float) -> list | None:
+    if not 0 <= frame < len(poses):
+        return None
+
+    reach = max(1, round(fps * .25))
+    previous = None
+    following = None
+    for distance in range(1, reach + 1):
+        if previous is None:
+            point = sway_point(poses, frame - distance, "right_knee", "rk")
+            if point is not None:
+                previous = distance, point
+        if following is None:
+            point = sway_point(poses, frame + distance, "right_knee", "rk")
+            if point is not None:
+                following = distance, point
+        if previous and following:
+            before, start = previous
+            after, end = following
+            fraction = before / (before + after)
+            return [a + (b - a) * fraction for a, b in zip(start, end)]
+
+    nearest = previous or following
+    if nearest:
+        return nearest[1]
+
+    # Keep a usable landmark when the detector reports a coordinate but low visibility.
+    point = (poses[frame] or {}).get("rk")
+    return point if valid_point(point) else None
+
+
 def sway_x(poses: list, frame: int, fps: float, guide: str, point: str) -> float | None:
     current = sway_point(poses, frame, guide, point)
     if current is None:
-        return None
+        estimated = right_knee_fallback(poses, frame, fps) if guide == "right_knee" else None
+        return estimated[0] if estimated is not None else None
     x = current[0]
     if fps < 24:
         return x
@@ -424,7 +456,10 @@ def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
     guide, point, default_radius = SWAY_CIRCLE_POINTS[code]
     poses = job["poses"]
     reference_frame = job["p_frames"]["P1"]
+    fps = job["info"]["fps"]
     origin = sway_point(poses, reference_frame, guide, point)
+    if origin is None and guide == "right_knee":
+        origin = right_knee_fallback(poses, reference_frame, fps)
     guides = job["guides"]
     anchor = guides.get(f"{guide}_center") or origin
     if anchor is None:
@@ -433,7 +468,6 @@ def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
             "anchor": anchor, "sway_guide": guide}
     circles = [{**base, "id": f"{guide}_reference", "center": anchor,
                 "dash": "dashed", "offset": [0, 0]}]
-    fps = job["info"]["fps"]
     current_x = sway_x(poses, frame, fps, guide, point)
     if origin is not None and current_x is not None:
         reference_x = sway_x(poses, reference_frame, fps, guide, point)
@@ -2086,7 +2120,7 @@ def render_app():
         st.caption("後方撮影のP1だけに表示します。P1で腰側とひざ側の丸をドラッグして調整できます。")
     if line == "right_knee_circle":
         st.caption("点線はP1の基準です。実線は高さを固定し、右ひざの左右の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
-        if sway_point(job["poses"], job["p_frames"]["P1"], "right_knee", "rk") is None:
+        if sway_x(job["poses"], job["p_frames"]["P1"], job["info"]["fps"], "right_knee", "rk") is None:
             st.caption("P1で右ひざを検出できません。右ひざが見えるコマにP1を調整してください。")
     if line == "pelvis_circle":
         st.caption("点線はP1の基準、実線は同じ高さで骨盤中心の左右の動きに追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
