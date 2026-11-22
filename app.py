@@ -38,8 +38,12 @@ LINE_NAMES["pelvis_circle"] = "骨盤中心の左右の動き（円）"
 COLORS["pelvis_circle"] = "#FF9500"
 LINE_NAMES["right_knee_circle"] = "右ひざの左右の動き（Sway）"
 COLORS["right_knee_circle"] = "#CE83FF"
+LINE_NAMES["left_knee_circle"] = "左ひざの左右の動き（Sway）"
+COLORS["left_knee_circle"] = "#63F06F"
+KNEE_LANDMARKS = {"right_knee": ("rk", 26), "left_knee": ("lk", 25)}
 SWAY_CIRCLE_POINTS = {"pelvis_circle": ("pelvis", "hip", .045),
-                      "right_knee_circle": ("right_knee", "rk", .035)}
+                      **{f"{guide}_circle": (guide, key, .035)
+                         for guide, (key, _) in KNEE_LANDMARKS.items()}}
 FRONT_ONLY_LINES = ("right_leg_outer", *SWAY_CIRCLE_POINTS)
 DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES]
 FRONT_DEFAULT_LINES = ["head", "tilt", "shoulders", "ankles", *FRONT_ONLY_LINES]
@@ -103,7 +107,7 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
     ear_width = math.hypot(lm[7].x-lm[8].x, (lm[7].y-lm[8].y)*height/width)
     left_hip, right_hip = point(23), point(24)
     left_ankle, right_ankle = point(27), point(28)
-    pose = {"head":head, "radius":max(.018, min(.10, ear_width*.75)), "ls":point(11), "rs":point(12), "sh":mid(11,12), "hip":mid(23,24), "rk":point(26), "wr":mid(15,16), "la":left_ankle, "ra":right_ankle}
+    pose = {"head":head, "radius":max(.018, min(.10, ear_width*.75)), "ls":point(11), "rs":point(12), "sh":mid(11,12), "hip":mid(23,24), "wr":mid(15,16), "la":left_ankle, "ra":right_ankle}
     wrist_visibilities = [float(lm[i].visibility) for i in (15, 16)]
     pose.update(lw=point(15), rw=point(16), wrist_visibility=max(wrist_visibilities),
                 larm_visibility=min(float(lm[i].visibility) for i in (11, 15)),
@@ -130,7 +134,10 @@ def pose_to_dict(lm, width: int, height: int) -> dict:
         all(float(lm[i].visibility) >= .55 for i in (23, 24))
         and all(valid_point(point) for point in (left_hip, right_hip))
     )
-    pose["right_knee_visible"] = float(lm[26].visibility) >= .55 and valid_point(pose["rk"])
+    for guide, (key, landmark) in KNEE_LANDMARKS.items():
+        coordinates = point(landmark)
+        pose[key] = coordinates
+        pose[f"{guide}_visible"] = float(lm[landmark].visibility) >= .55 and valid_point(coordinates)
     return pose
 
 
@@ -400,7 +407,7 @@ def sway_point(poses: list, frame: int, guide: str, point: str) -> list | None:
     return coordinates if valid_point(coordinates) else None
 
 
-def right_knee_fallback(poses: list, frame: int, fps: float) -> list | None:
+def knee_fallback(poses: list, frame: int, fps: float, guide: str, key: str) -> list | None:
     if not 0 <= frame < len(poses):
         return None
 
@@ -409,11 +416,11 @@ def right_knee_fallback(poses: list, frame: int, fps: float) -> list | None:
     following = None
     for distance in range(1, reach + 1):
         if previous is None:
-            point = sway_point(poses, frame - distance, "right_knee", "rk")
+            point = sway_point(poses, frame - distance, guide, key)
             if point is not None:
                 previous = distance, point
         if following is None:
-            point = sway_point(poses, frame + distance, "right_knee", "rk")
+            point = sway_point(poses, frame + distance, guide, key)
             if point is not None:
                 following = distance, point
         if previous and following:
@@ -427,14 +434,14 @@ def right_knee_fallback(poses: list, frame: int, fps: float) -> list | None:
         return nearest[1]
 
     # Keep a usable landmark when the detector reports a coordinate but low visibility.
-    point = (poses[frame] or {}).get("rk")
+    point = (poses[frame] or {}).get(key)
     return point if valid_point(point) else None
 
 
 def sway_x(poses: list, frame: int, fps: float, guide: str, point: str) -> float | None:
     current = sway_point(poses, frame, guide, point)
     if current is None:
-        estimated = right_knee_fallback(poses, frame, fps) if guide == "right_knee" else None
+        estimated = knee_fallback(poses, frame, fps, guide, point) if guide in KNEE_LANDMARKS else None
         return estimated[0] if estimated is not None else None
     x = current[0]
     if fps < 24:
@@ -458,8 +465,8 @@ def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
     reference_frame = job["p_frames"]["P1"]
     fps = job["info"]["fps"]
     origin = sway_point(poses, reference_frame, guide, point)
-    if origin is None and guide == "right_knee":
-        origin = right_knee_fallback(poses, reference_frame, fps)
+    if origin is None and guide in KNEE_LANDMARKS:
+        origin = knee_fallback(poses, reference_frame, fps, guide, point)
     guides = job["guides"]
     anchor = guides.get(f"{guide}_center") or origin
     if anchor is None:
@@ -859,7 +866,7 @@ function geometry(item){const s=clone(item);if(s.id==='shaft'){const[a,b]=g.shaf
 }if(s.id==='head_reference'){s.center=g.head;s.radius=g.radius;}if(s.id==='head'){const d=s.head_delta||[0,0];s.center=[g.head[0]+d[0],g.head[1]+d[1]];s.radius=g.radius;}if(body){if(s.id==='shoulders'){s.a=body.ls;s.b=body.rs;}if(s.id==='hip_right_knee'&&body.rk){s.a=body.hip;s.b=body.rk;}if(s.id==='right_leg_outer'&&args.phase==='P1'){s.a=body.right_ankle_outer;s.b=body.right_thigh_outer;}if(s.id==='tilt_zero'){s.a=body.hip;s.b=[body.hip[0],body.sh[1]];}if(s.id==='spine'||s.id==='tilt'){s.a=body.hip;s.b=body.sh;}}if(s.id==='shoulders'){const right=s.a[0]>=s.b[0]?s.a:s.b;s.label_pos=[right[0]+.025,right[1]-.01];}return s;}
 function draw(s){ctx.save();style(s);ctx.beginPath();if(s.type==='line'){ctx.moveTo(s.a[0]*canvas.width,s.a[1]*canvas.height);ctx.lineTo(s.b[0]*canvas.width,s.b[1]*canvas.height);}else if(s.type==='circle'&&s.center){ctx.arc(s.center[0]*canvas.width,s.center[1]*canvas.height,s.radius*canvas.width,0,Math.PI*2);}else if(s.type==='free'){s.points.forEach((p,i)=>i?ctx.lineTo(p[0]*canvas.width,p[1]*canvas.height):ctx.moveTo(p[0]*canvas.width,p[1]*canvas.height));}ctx.stroke();ctx.restore();if(s.type==='line'&&s.angle){let a=Math.round(Math.atan2(Math.abs((s.b[1]-s.a[1])*canvas.height),Math.abs((s.b[0]-s.a[0])*canvas.width))*180/Math.PI);if(s.vertical){const dx=(s.b[0]-s.a[0])*canvas.width,dy=(s.b[1]-s.a[1])*canvas.height;a=Math.round(Math.atan2(Math.abs(dx),Math.abs(dy))*180/Math.PI);if(dx*(s.target_dir||-1)<0)a=-a;}text(a+'°',s.label_pos||[(s.a[0]+s.b[0])/2+.014,(s.a[1]+s.b[1])/2-.01],s.color,true);}}
 function handles(){const out=[],shown=id=>args.primitives.some(s=>s.id===id);const add=(p,type,key,extra={})=>{if(p)out.push({p,type,key,...extra});};if(shown('shaft'))g.shaft.forEach((p,i)=>add(p,'shaft',i,{label:i===0?'ヘッド側':'グリップ側',color:i===0?'#58d6ef':'#e9f38a'}));if(shown('hip'))add([g.hip,(g.top+g.bottom)/2],'hip',null,{label:'ヒップ',color:'#ffbf69'});
-const swayGuide={pelvis_circle:'pelvis',right_knee_circle:'right_knee'}[args.active_line];
+const swayGuide={pelvis_circle:'pelvis',right_knee_circle:'right_knee',left_knee_circle:'left_knee'}[args.active_line];
 if(swayGuide){
     const circle=args.primitives.find(s=>s.id===args.active_line)
         || args.primitives.find(s=>s.sway_guide===swayGuide);
@@ -1091,11 +1098,15 @@ def step_frame(code,widget,delta):
 
 def refresh_pose_points(job: dict, keys: tuple, progress) -> int:
     detected = analyze_skeleton(Path(job["path"]), job["info"], progress)
+    visibility_keys = [f"{guide}_visible" for guide, (key, _) in KNEE_LANDMARKS.items()
+                       if key in keys]
     updates = 0
     for index, new_pose in enumerate(detected[:len(job["poses"])]):
         if new_pose and all(valid_point(new_pose.get(key)) for key in keys):
             pose = job["poses"][index] or new_pose
             job["poses"][index] = {**pose, **{key: new_pose[key] for key in keys}}
+            for visibility_key in visibility_keys:
+                job["poses"][index][visibility_key] = new_pose[visibility_key]
             updates += 1
     for code, body in job["body_overrides"].items():
         pose = job["poses"][job["p_frames"][code]]
@@ -1974,6 +1985,10 @@ def render_app():
     if styles and "pelvis_circle" not in styles and not rear_mode:
         current_lines = st.session_state["enabled_lines"]
         st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, "pelvis_circle"]))
+    if styles and "left_knee_circle" not in styles and not rear_mode:
+        current_lines = st.session_state["enabled_lines"]
+        st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, "left_knee_circle"]))
+        st.session_state.pop("line_visibility_front", None)
     for key, color in COLORS.items():
         styles.setdefault(key, {"color":color, "width":3, "dash":"dashed" if key in ("hip", "back_vertical") else "solid", "positions":[]})
     if not st.session_state.get("back_vertical_dash_initialized"):
@@ -2095,12 +2110,13 @@ def render_app():
         st.caption("P1の頭頂から足元までを目安にした垂直線です。丸をドラッグすると左右に移動します。")
     for line_code, points, part in (
         ("hip_right_knee", ("rk",), "右ひざ"),
+        ("left_knee_circle", ("lk",), "左ひざ"),
         ("right_leg_outer", RIGHT_LEG_POINTS, "右脚の外側の位置"),
     ):
         if line_code not in enabled:
             continue
         detected = (right_leg_reference(job) is not None if line_code == "right_leg_outer"
-                    else any(pose and valid_point(pose.get("rk")) for pose in job["poses"]))
+                    else any(pose and valid_point(pose.get(points[0])) for pose in job["poses"]))
         if not detected:
             if st.button(f"編集中の動画で{part}を検出"):
                 progress = st.progress(0, text=f"{part}を検出しています…")
@@ -2118,10 +2134,12 @@ def render_app():
                     progress.empty()
     if line == "hip_right_knee":
         st.caption("後方撮影のP1だけに表示します。P1で腰側とひざ側の丸をドラッグして調整できます。")
-    if line == "right_knee_circle":
-        st.caption("点線はP1の基準です。実線は高さを固定し、右ひざの左右の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
-        if sway_x(job["poses"], job["p_frames"]["P1"], job["info"]["fps"], "right_knee", "rk") is None:
-            st.caption("P1で右ひざを検出できません。右ひざが見えるコマにP1を調整してください。")
+    if line in ("right_knee_circle", "left_knee_circle"):
+        guide, point, _ = SWAY_CIRCLE_POINTS[line]
+        knee = "左ひざ" if guide == "left_knee" else "右ひざ"
+        st.caption(f"点線はP1の基準です。実線は高さを固定し、{knee}の左右の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
+        if sway_x(job["poses"], job["p_frames"]["P1"], job["info"]["fps"], guide, point) is None:
+            st.caption(f"P1で{knee}を検出できません。{knee}が見えるコマにP1を調整してください。")
     if line == "pelvis_circle":
         st.caption("点線はP1の基準、実線は同じ高さで骨盤中心の左右の動きに追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
     if line == "right_leg_outer":
