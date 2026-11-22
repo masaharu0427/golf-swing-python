@@ -36,9 +36,9 @@ COLORS["right_leg_outer"] = "#1BC4D4"
 REAR_ONLY_LINES = ("back_vertical", "hip_right_knee")
 LINE_NAMES["pelvis_circle"] = "骨盤中心の左右の動き（円）"
 COLORS["pelvis_circle"] = "#FF9500"
-LINE_NAMES["right_knee_circle"] = "右ひざの左右の動き（Sway）"
+LINE_NAMES["right_knee_circle"] = "右ひざの左右・上下の動き（円）"
 COLORS["right_knee_circle"] = "#CE83FF"
-LINE_NAMES["left_knee_circle"] = "左ひざの左右の動き（Sway）"
+LINE_NAMES["left_knee_circle"] = "左ひざの左右・上下の動き（円）"
 COLORS["left_knee_circle"] = "#63F06F"
 KNEE_LANDMARKS = {"right_knee": ("rk", 26), "left_knee": ("lk", 25)}
 SWAY_CIRCLE_POINTS = {"pelvis_circle": ("pelvis", "hip", .045),
@@ -438,25 +438,26 @@ def knee_fallback(poses: list, frame: int, fps: float, guide: str, key: str) -> 
     return point if valid_point(point) else None
 
 
-def sway_x(poses: list, frame: int, fps: float, guide: str, point: str) -> float | None:
+def tracked_sway_point(poses: list, frame: int, fps: float, guide: str, point: str) -> list | None:
     current = sway_point(poses, frame, guide, point)
     if current is None:
-        estimated = knee_fallback(poses, frame, fps, guide, point) if guide in KNEE_LANDMARKS else None
-        return estimated[0] if estimated is not None else None
-    x = current[0]
+        return knee_fallback(poses, frame, fps, guide, point) if guide in KNEE_LANDMARKS else None
     if fps < 24:
-        return x
+        return current
 
     previous = sway_point(poses, frame - 1, guide, point)
     following = sway_point(poses, frame + 1, guide, point)
     if previous is None or following is None:
-        return x
-    left, right = sorted((previous[0], following[0]))
-    nearest_jump = max(left - x, x - right, 0)
+        return current
+
     # Correct only a pronounced one-frame excursion when the neighbors agree.
-    if nearest_jump >= .01 and nearest_jump >= 2 * (right - left):
-        return (left + right) / 2
-    return x
+    position = current[:]
+    for axis, value in enumerate(current):
+        low, high = sorted((previous[axis], following[axis]))
+        jump = max(low - value, value - high, 0)
+        if jump >= .01 and jump >= 2 * (high - low):
+            position[axis] = (low + high) / 2
+    return position
 
 
 def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
@@ -464,9 +465,8 @@ def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
     poses = job["poses"]
     reference_frame = job["p_frames"]["P1"]
     fps = job["info"]["fps"]
-    origin = sway_point(poses, reference_frame, guide, point)
-    if origin is None and guide in KNEE_LANDMARKS:
-        origin = knee_fallback(poses, reference_frame, fps, guide, point)
+    reference = tracked_sway_point(poses, reference_frame, fps, guide, point)
+    origin = sway_point(poses, reference_frame, guide, point) or reference
     guides = job["guides"]
     anchor = guides.get(f"{guide}_center") or origin
     if anchor is None:
@@ -475,10 +475,9 @@ def sway_circles(job: dict, frame: int, style: dict, code: str) -> list:
             "anchor": anchor, "sway_guide": guide}
     circles = [{**base, "id": f"{guide}_reference", "center": anchor,
                 "dash": "dashed", "offset": [0, 0]}]
-    current_x = sway_x(poses, frame, fps, guide, point)
-    if origin is not None and current_x is not None:
-        reference_x = sway_x(poses, reference_frame, fps, guide, point)
-        offset = [current_x - reference_x, 0]
+    current = tracked_sway_point(poses, frame, fps, guide, point)
+    if reference is not None and current is not None:
+        offset = [current[0] - reference[0], current[1] - reference[1] if guide in KNEE_LANDMARKS else 0]
         center = [start + delta for start, delta in zip(anchor, offset)]
         circles.append({**base, "id": code, "dash": "solid", "center": center, "offset": offset})
     return circles
@@ -2081,6 +2080,10 @@ def render_app():
         if not rear_mode and "pelvis_circle" in enabled:
             clear_outputs()
         job["pelvis_horizontal_tracking"] = True
+    if not job.get("knee_vertical_tracking"):
+        if not rear_mode and any(f"{guide}_circle" in enabled for guide in KNEE_LANDMARKS):
+            clear_outputs()
+        job["knee_vertical_tracking"] = True
     if not rear_mode and not any(pose and "pelvis_visible" in pose for pose in job["poses"]):
         st.caption("骨盤の円を表示するには、AI骨格解析を有効にして動画を読み込み直してください。")
     if "back_vertical" not in job["guides"]:
@@ -2137,8 +2140,8 @@ def render_app():
     if line in ("right_knee_circle", "left_knee_circle"):
         guide, point, _ = SWAY_CIRCLE_POINTS[line]
         knee = "左ひざ" if guide == "left_knee" else "右ひざ"
-        st.caption(f"点線はP1の基準です。実線は高さを固定し、{knee}の左右の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
-        if sway_x(job["poses"], job["p_frames"]["P1"], job["info"]["fps"], guide, point) is None:
+        st.caption(f"点線はP1の基準です。実線は{knee}の左右・上下の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
+        if tracked_sway_point(job["poses"], job["p_frames"]["P1"], job["info"]["fps"], guide, point) is None:
             st.caption(f"P1で{knee}を検出できません。{knee}が見えるコマにP1を調整してください。")
     if line == "pelvis_circle":
         st.caption("点線はP1の基準、実線は同じ高さで骨盤中心の左右の動きに追従します。どのポジションでも、中央の点をドラッグすると位置、右端の点をドラッグすると大きさを調整できます。")
