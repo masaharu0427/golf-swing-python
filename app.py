@@ -744,23 +744,23 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
 
-def pause_plan(job: dict, pauses: list, pause_seconds: float) -> dict:
-    if not math.isfinite(pause_seconds) or pause_seconds<=0:
-        raise ValueError("停止時間は0秒より大きくしてください。")
+def pause_plan(job: dict, durations: dict[str, float]) -> dict[int, list[tuple[str, int]]]:
     plan={}
-    for code in dict.fromkeys(pauses):
+    for code, seconds in durations.items():
         if code not in P_CODES:
             raise ValueError(f"不明な停止ポジションです：{code}")
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError(f"{code}の停止時間は0秒より大きくしてください。")
         frame=job["p_frames"].get(code)
         if not isinstance(frame,int) or not 0<=frame<job["info"]["frames"]:
             raise ValueError(f"{code}のコマ番号が動画の範囲外です。コマを調整してください。")
-        plan.setdefault(frame,[]).append(code)
+        hold_frames = max(1, round(job["info"]["fps"] * seconds))
+        plan.setdefault(frame,[]).append((code, hold_frames))
     return plan
 
 
-def export_video(job: dict, cfg: dict, pauses: list, pause_seconds: float, custom_positions: list, progress=None) -> Path:
-    plan=pause_plan(job,pauses,pause_seconds)
-    hold_frames=max(1,round(job["info"]["fps"]*pause_seconds))
+def export_video(job: dict, cfg: dict, durations: dict[str, float], custom_positions: list, progress=None) -> Path:
+    plan=pause_plan(job,durations)
     folder=Path(job["folder"])/"output";folder.mkdir(exist_ok=True)
     raw,final=folder/(uuid.uuid4().hex+"_raw.mp4"),folder/(uuid.uuid4().hex+"_analyzed.mp4")
     info=job["info"]
@@ -774,7 +774,7 @@ def export_video(job: dict, cfg: dict, pauses: list, pause_seconds: float, custo
             if not ok: raise ValueError("元動画の途中を読み取れませんでした。別の動画でお試しください。")
             image=draw_annotations(frame,primitives_for(job,i,cfg,None,custom_positions))
             writer.write(image)
-            for code in plan.get(i,[]):
+            for code, hold_frames in plan.get(i,[]):
                 paused=draw_annotations(frame,primitives_for(job,i,cfg,code,custom_positions),code,sportsbox_overlay(job,code))
                 for _ in range(hold_frames):writer.write(paused)
             if progress and i%10==0:progress((i+1)/info["frames"],f"動画を書き出し中 {i+1}/{info['frames']}")
@@ -1266,6 +1266,12 @@ def mobile_upload(kind: str, state: dict, key: str) -> MobileUpload | None:
 def clear_outputs():
     if "job" in st.session_state:
         st.session_state["job"]["output_video"]=None;st.session_state["job"]["output_images"]=None
+
+
+def store_pause_duration(code: str, widget_key: str) -> None:
+    seconds_by_position = st.session_state.setdefault("pause_seconds_by_position", {})
+    seconds_by_position[code] = st.session_state[widget_key]
+    clear_outputs()
 
 
 def switch_mode(front=False):
@@ -2067,7 +2073,8 @@ WORKSPACE_SETTINGS = {
     "active_p", "active_line", "camera_mode", "enabled_lines", "styles",
     "line_visibility_recovered",
     "show_p1_reference", "target_side", "custom_positions", "show_phase_list",
-    "pause_positions", "pause_seconds", "snapshot_positions", "upload_method",
+    "pause_positions", "pause_seconds", "individual_pause_times", "pause_seconds_by_position",
+    "snapshot_positions", "upload_method",
     "back_vertical_dash_initialized", "swing_handedness",
 }
 
@@ -2404,11 +2411,26 @@ def render_app():
     a,b=st.columns(2)
     pauses=a.multiselect("動画で止めるP",P_CODES,default=["P1","P4","P7"],key="pause_positions",on_change=clear_outputs)
     snapshots=b.multiselect("静止画にするP",P_CODES,default=["P1","P4","P7"],key="snapshot_positions",on_change=clear_outputs)
-    seconds=st.slider("動画での停止時間（秒）",.5,5.,2.,.5,key="pause_seconds",on_change=clear_outputs)
+    seconds=st.slider("共通の停止時間（秒）",.5,5.,2.,.5,key="pause_seconds",on_change=clear_outputs)
+    individual = st.checkbox("Pごとに停止時間を設定", key="individual_pause_times", on_change=clear_outputs)
+    durations = dict.fromkeys(pauses, seconds)
+    if individual and pauses:
+        saved_seconds = st.session_state.get("pause_seconds_by_position", {})
+        cols = st.columns(2)
+        for index, code in enumerate(pauses):
+            widget_key = f"pause_seconds_{code}"
+            durations[code] = cols[index % 2].number_input(
+                f"{code}の停止時間（秒）", min_value=.5, max_value=5., step=.5,
+                value=saved_seconds.get(code, seconds), format="%.1f", key=widget_key,
+                on_change=store_pause_duration, args=(code, widget_key),
+            )
     st.caption("線を表示するPとは別に、上の「動画で止めるP」で停止対象を選びます。変更後は分析動画を作り直してください。")
     if pauses:
-        plan=pause_plan(job,pauses,seconds)
-        st.caption("停止予定："+" ／ ".join(f"{p}：{job['p_frames'][p]}コマ（元動画 {job['p_frames'][p]/info['fps']:.2f}秒）" for p in pauses))
+        plan=pause_plan(job,durations)
+        st.caption("停止予定："+" ／ ".join(
+            f"{p}：{duration:g}秒停止（元動画 {job['p_frames'][p]/info['fps']:.2f}秒）"
+            for p, duration in durations.items()
+        ))
         if any(len(codes)>1 for codes in plan.values()):
             st.info("同じコマに設定されたPがあります。各Pの名前を表示して順番に停止します。別の瞬間で止める場合は、上のコマ調整で位置を分けてください。")
     else:
@@ -2417,7 +2439,7 @@ def render_app():
     if a.button("🎬 分析動画を作成",type="primary",use_container_width=True):
         progress=st.progress(0,text="動画を作成しています…")
         try:
-            job["output_video"]=str(export_video(job,cfg,pauses,seconds,custom_positions,lambda v,t:progress.progress(v,text=t)))
+            job["output_video"]=str(export_video(job,cfg,durations,custom_positions,lambda v,t:progress.progress(v,text=t)))
             st.success("動画を作成しました。下のボタンで保存してください。")
         except Exception as exc:st.error(str(exc))
         finally:progress.empty()
