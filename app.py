@@ -678,6 +678,9 @@ def phase_note_overlay(note: str, frame_size: tuple[int, int]) -> Image.Image | 
         (0, 0), caption, font=font, spacing=gap, align="center", stroke_width=stroke,
     )
     left, top, right, bottom = bounds
+    # Centered multiline text can have fractional bounds. Round outward to keep the outline.
+    left, top = math.floor(left), math.floor(top)
+    right, bottom = math.ceil(right), math.ceil(bottom)
     text_width, text_height = right - left, bottom - top
     overlay = Image.new("RGBA", (text_width + 2 * pad, text_height + 2 * pad))
     draw = ImageDraw.Draw(overlay)
