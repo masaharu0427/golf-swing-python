@@ -2531,10 +2531,6 @@ def render_app():
     .st-key-compact_preview [data-testid="stSlider"] {padding-top: 0; padding-bottom: 0;}
     </style>""",unsafe_allow_html=True)
     with st.container(key="compact_preview"):
-        prev_col,slider_col,next_col=st.columns([1.5,6,1.5],vertical_alignment="center")
-        prev_col.button("◀ 前",help="1コマ前",on_click=step_frame,args=(code,widget,-1),use_container_width=True)
-        slider_col.slider("コマ番号",0,info["frames"]-1,key=widget,on_change=frame_change,args=(code,widget),label_visibility="collapsed")
-        next_col.button("次 ▶",help="1コマ後",on_click=step_frame,args=(code,widget,1),use_container_width=True)
         phase_notes = job.get("phase_notes", {})
         note_positions = job.get("phase_note_positions", {})
         note_styles = job.get("phase_note_styles", {})
@@ -2561,6 +2557,10 @@ def render_app():
         )
         if note:
             st.caption("プレビュー上のテキストを直接ドラッグして移動できます。")
+        prev_col,slider_col,next_col=st.columns([1.5,6,1.5],vertical_alignment="center")
+        prev_col.button("◀ 前",help="1コマ前",on_click=step_frame,args=(code,widget,-1),use_container_width=True)
+        slider_col.slider("コマ番号",0,info["frames"]-1,key=widget,on_change=frame_change,args=(code,widget),label_visibility="collapsed")
+        next_col.button("次 ▶",help="1コマ後",on_click=step_frame,args=(code,widget,1),use_container_width=True)
         frame_index=int(st.session_state[widget]);job["p_frames"][code]=frame_index
         current=read_frame(job["path"],frame_index)
         note_image = None
