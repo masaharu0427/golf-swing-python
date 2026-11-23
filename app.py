@@ -28,6 +28,7 @@ import streamlit as st
 from streamlit.components.v1 import declare_component
 
 P_CODES = [f"P{i}" for i in range(1, 11)]
+PHASE_NOTE_MAX_CHARS = 60
 P_NAMES = dict(zip(P_CODES, ["アドレス", "テイクバック", "ハーフウェイバック", "トップ", "リード腕が水平（ダウンスイング）", "デリバリー", "インパクト", "フォロー", "ハイフォロー", "フィニッシュ"]))
 LINE_NAMES = {"head":"頭の円（追従＋P1基準）", "spine":"胸と腰の中心線（前傾角）", "tilt":"胸と腰の傾き（正面）", "shoulders":"両肩のライン", "shaft":"シャフトプレーン", "hip":"ヒップライン", "ankles":"両足首の垂線", "vertical":"腰中心の垂直基準線", "back_vertical":"垂直基準線（身長程度）", "hip_right_knee":"腰の中心〜右ひざの中心"}
 COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0FDE32", "shaft":"#FFFFFF", "hip":"#FFCC55", "ankles":"#FFFF00", "vertical":"#43D9E6", "back_vertical":"#FFFFFF", "hip_right_knee":"#FFFF00"}
@@ -649,8 +650,49 @@ def sportsbox_overlay(job: dict, phase: str) -> list[list[list[tuple[str, str]]]
     return panels
 
 
+def draw_phase_note(image: Image.Image, note: str) -> None:
+    width, height = image.size
+    size = max(1, round(min(width * .056, height * .05)))
+    font = pil_font(size)
+    margin = max(1, round(width * .045))
+    pad = max(1, size // 3)
+    stroke = max(1, size // 12)
+    max_width = max(1, width - 2 * (margin + pad + stroke))
+    draw = ImageDraw.Draw(image, "RGBA")
+    lines = []
+    line = ""
+    for char in note:
+        if line and draw.textlength(line + char, font=font) > max_width:
+            lines.append(line.rstrip())
+            line = ""
+        if line or not char.isspace():
+            line += char
+    if line:
+        lines.append(line.rstrip())
+    caption = "\n".join(lines)
+    if not caption:
+        return
+    gap = max(1, size // 5)
+    bounds = draw.multiline_textbbox(
+        (0, 0), caption, font=font, spacing=gap, align="center", stroke_width=stroke,
+    )
+    left, top, right, bottom = bounds
+    text_width, text_height = right - left, bottom - top
+    x = (width - text_width) // 2
+    y = height - max(pad, round(height * .045)) - pad - text_height
+    draw.rounded_rectangle(
+        (x - pad, y - pad, x + text_width + pad, y + text_height + pad),
+        radius=pad, fill=(0, 0, 0, 175),
+    )
+    draw.multiline_text(
+        (x - left, y - top), caption, font=font, fill="white", spacing=gap,
+        align="center", stroke_width=stroke, stroke_fill="black",
+    )
+
+
 def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
-                     sportsbox: list[list[list[tuple[str, str]]]] | None = None) -> np.ndarray:
+                     sportsbox: list[list[list[tuple[str, str]]]] | None = None,
+                     phase_note: str = "") -> np.ndarray:
     im = Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(im)
     w,h = im.size
@@ -741,6 +783,8 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
                               anchor="rs", stroke_width=stroke, stroke_fill="black")
                     right -= draw.textlength(text, font=font)
             top = bottom + pad + 1
+    if phase_note:
+        draw_phase_note(im, phase_note)
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
 
@@ -761,6 +805,7 @@ def pause_plan(job: dict, durations: dict[str, float]) -> dict[int, list[tuple[s
 
 def export_video(job: dict, cfg: dict, durations: dict[str, float], custom_positions: list, progress=None) -> Path:
     plan=pause_plan(job,durations)
+    notes = job.get("phase_notes", {})
     folder=Path(job["folder"])/"output";folder.mkdir(exist_ok=True)
     raw,final=folder/(uuid.uuid4().hex+"_raw.mp4"),folder/(uuid.uuid4().hex+"_analyzed.mp4")
     info=job["info"]
@@ -775,7 +820,8 @@ def export_video(job: dict, cfg: dict, durations: dict[str, float], custom_posit
             image=draw_annotations(frame,primitives_for(job,i,cfg,None,custom_positions))
             writer.write(image)
             for code, hold_frames in plan.get(i,[]):
-                paused=draw_annotations(frame,primitives_for(job,i,cfg,code,custom_positions),code,sportsbox_overlay(job,code))
+                paused=draw_annotations(frame,primitives_for(job,i,cfg,code,custom_positions),
+                                        code,sportsbox_overlay(job,code),phase_note=notes.get(code, ""))
                 for _ in range(hold_frames):writer.write(paused)
             if progress and i%10==0:progress((i+1)/info["frames"],f"動画を書き出し中 {i+1}/{info['frames']}")
         completed=True
@@ -811,6 +857,7 @@ def white_frame_margins(frame: np.ndarray) -> tuple[int, int, int, int]:
 
 def export_images(job: dict,cfg: dict,codes: list,custom_positions: list) -> dict:
     if not codes: raise ValueError("切り出すポジションを1つ以上選んでください。")
+    notes = job.get("phase_notes", {})
     annotated_frames = []
     margins = []
     for code in codes:
@@ -819,7 +866,7 @@ def export_images(job: dict,cfg: dict,codes: list,custom_positions: list) -> dic
         margins.append(white_frame_margins(frame))
         annotated_frames.append(draw_annotations(
             frame, primitives_for(job, index, cfg, code, custom_positions),
-            code, sportsbox_overlay(job, code),
+            code, sportsbox_overlay(job, code), phase_note=notes.get(code, ""),
         ))
 
     # Use the same crop on every frame so the reference lines still align.
@@ -1266,6 +1313,16 @@ def mobile_upload(kind: str, state: dict, key: str) -> MobileUpload | None:
 def clear_outputs():
     if "job" in st.session_state:
         st.session_state["job"]["output_video"]=None;st.session_state["job"]["output_images"]=None
+
+
+def store_phase_note(code: str, widget_key: str) -> None:
+    note = st.session_state[widget_key].strip()
+    notes = st.session_state["job"].setdefault("phase_notes", {})
+    if note:
+        notes[code] = note
+    else:
+        notes.pop(code, None)
+    clear_outputs()
 
 
 def store_pause_duration(code: str, widget_key: str) -> None:
@@ -2379,8 +2436,19 @@ def render_app():
         prev_col.button("◀ 前",help="1コマ前",on_click=step_frame,args=(code,widget,-1),use_container_width=True)
         slider_col.slider("コマ番号",0,info["frames"]-1,key=widget,on_change=frame_change,args=(code,widget),label_visibility="collapsed")
         next_col.button("次 ▶",help="1コマ後",on_click=step_frame,args=(code,widget,1),use_container_width=True)
+        phase_notes = job.get("phase_notes", {})
+        note = phase_notes.get(code, "")
+        note_key = f"phase_note_{job['token']}_{code}"
+        st.text_input(
+            f"{code}の表示テキスト", value=note, max_chars=PHASE_NOTE_MAX_CHARS, key=note_key,
+            placeholder="例　切り返しで左足に乗る",
+            help="Enterで反映します。プレビュー・静止画・動画でこのPが停止する間に表示します。",
+            on_change=store_phase_note, args=(code, note_key),
+        )
         frame_index=int(st.session_state[widget]);job["p_frames"][code]=frame_index
         current=read_frame(job["path"],frame_index)
+        if note:
+            current = draw_annotations(current, [], phase_note=note)
         ok,jpg=cv2.imencode(".jpg",current,[cv2.IMWRITE_JPEG_QUALITY,88])
         body=get_pose(job,frame_index,code)
         if code == "P1" and (reference := right_leg_reference(job)):
@@ -2406,7 +2474,11 @@ def render_app():
             cols=st.columns(5)
             for col,p in zip(cols,P_CODES[start:start+5]):
                 idx=job["p_frames"][p]
-                col.image(cv2.cvtColor(draw_annotations(read_frame(job["path"],idx),primitives_for(job,idx,cfg,p,custom_positions),p,sportsbox_overlay(job,p)),cv2.COLOR_BGR2RGB),caption=f"{p} {idx}コマ",use_container_width=True)
+                preview = draw_annotations(
+                    read_frame(job["path"],idx), primitives_for(job,idx,cfg,p,custom_positions),
+                    p, sportsbox_overlay(job,p), phase_note=phase_notes.get(p, ""),
+                )
+                col.image(cv2.cvtColor(preview,cv2.COLOR_BGR2RGB),caption=f"{p} {idx}コマ",use_container_width=True)
     st.divider();st.subheader("3. 作成して保存する")
     a,b=st.columns(2)
     pauses=a.multiselect("動画で止めるP",P_CODES,default=["P1","P4","P7"],key="pause_positions",on_change=clear_outputs)
