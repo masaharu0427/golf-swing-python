@@ -2547,19 +2547,19 @@ def render_app():
             help="Enterで反映します。映像上のテキストを直接ドラッグして移動できます。",
             on_change=store_phase_note, args=(code, note_key),
         )
+        size_col, color_col = st.columns(2)
+        size_key, color_key = f"{note_key}_size", f"{note_key}_color"
+        style_args = (code, size_key, color_key)
+        size_col.select_slider(
+            "文字の大きさ", options=PHASE_NOTE_SIZES,
+            value=note_style.get("size", DEFAULT_PHASE_NOTE_SIZE), format_func=lambda size: f"{size}％",
+            key=size_key, on_change=store_phase_note_style, args=style_args,
+        )
+        color_col.color_picker(
+            "文字の色", value=note_style.get("color", DEFAULT_PHASE_NOTE_COLOR),
+            key=color_key, on_change=store_phase_note_style, args=style_args,
+        )
         if note:
-            size_col, color_col = st.columns(2)
-            size_key, color_key = f"{note_key}_size", f"{note_key}_color"
-            style_args = (code, size_key, color_key)
-            size_col.select_slider(
-                "文字の大きさ", options=PHASE_NOTE_SIZES,
-                value=note_style.get("size", DEFAULT_PHASE_NOTE_SIZE), format_func=lambda size: f"{size}％",
-                key=size_key, on_change=store_phase_note_style, args=style_args,
-            )
-            color_col.color_picker(
-                "文字の色", value=note_style.get("color", DEFAULT_PHASE_NOTE_COLOR),
-                key=color_key, on_change=store_phase_note_style, args=style_args,
-            )
             st.caption("プレビュー上のテキストを直接ドラッグして移動できます。")
         frame_index=int(st.session_state[widget]);job["p_frames"][code]=frame_index
         current=read_frame(job["path"],frame_index)
