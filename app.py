@@ -29,6 +29,7 @@ from streamlit.components.v1 import declare_component
 
 P_CODES = [f"P{i}" for i in range(1, 11)]
 PHASE_NOTE_MAX_CHARS = 60
+DEFAULT_PHASE_NOTE_POSITION = (.5, .95)
 P_NAMES = dict(zip(P_CODES, ["アドレス", "テイクバック", "ハーフウェイバック", "トップ", "リード腕が水平（ダウンスイング）", "デリバリー", "インパクト", "フォロー", "ハイフォロー", "フィニッシュ"]))
 LINE_NAMES = {"head":"頭の円（追従＋P1基準）", "spine":"胸と腰の中心線（前傾角）", "tilt":"胸と腰の傾き（正面）", "shoulders":"両肩のライン", "shaft":"シャフトプレーン", "hip":"ヒップライン", "ankles":"両足首の垂線", "vertical":"腰中心の垂直基準線", "back_vertical":"垂直基準線（身長程度）", "hip_right_knee":"腰の中心〜右ひざの中心"}
 COLORS = {"head":"#43D9E6", "spine":"#FFFF00", "tilt":"#FFA500", "shoulders":"#0FDE32", "shaft":"#FFFFFF", "hip":"#FFCC55", "ankles":"#FFFF00", "vertical":"#43D9E6", "back_vertical":"#FFFFFF", "hip_right_knee":"#FFFF00"}
@@ -650,15 +651,15 @@ def sportsbox_overlay(job: dict, phase: str) -> list[list[list[tuple[str, str]]]
     return panels
 
 
-def draw_phase_note(image: Image.Image, note: str) -> None:
-    width, height = image.size
-    size = max(1, round(min(width * .056, height * .05)))
+def phase_note_overlay(note: str, frame_size: tuple[int, int]) -> Image.Image | None:
+    width, height = frame_size
+    size = max(1, round(min(width * .047, height * .042)))
     font = pil_font(size)
     margin = max(1, round(width * .045))
     pad = max(1, size // 3)
     stroke = max(1, size // 12)
     max_width = max(1, width - 2 * (margin + pad + stroke))
-    draw = ImageDraw.Draw(image, "RGBA")
+    draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     lines = []
     line = ""
     for char in note:
@@ -678,21 +679,23 @@ def draw_phase_note(image: Image.Image, note: str) -> None:
     )
     left, top, right, bottom = bounds
     text_width, text_height = right - left, bottom - top
-    x = (width - text_width) // 2
-    y = height - max(pad, round(height * .045)) - pad - text_height
+    overlay = Image.new("RGBA", (text_width + 2 * pad, text_height + 2 * pad))
+    draw = ImageDraw.Draw(overlay)
     draw.rounded_rectangle(
-        (x - pad, y - pad, x + text_width + pad, y + text_height + pad),
+        (0, 0, overlay.width - 1, overlay.height - 1),
         radius=pad, fill=(0, 0, 0, 175),
     )
     draw.multiline_text(
-        (x - left, y - top), caption, font=font, fill="white", spacing=gap,
+        (pad - left, pad - top), caption, font=font, fill="white", spacing=gap,
         align="center", stroke_width=stroke, stroke_fill="black",
     )
+    return overlay
 
 
 def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
                      sportsbox: list[list[list[tuple[str, str]]]] | None = None,
-                     phase_note: str = "") -> np.ndarray:
+                     phase_note: str = "",
+                     note_position: tuple[float, float] | list[float] = DEFAULT_PHASE_NOTE_POSITION) -> np.ndarray:
     im = Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(im)
     w,h = im.size
@@ -783,8 +786,10 @@ def draw_annotations(frame: np.ndarray, shapes: list, label: str | None = None,
                               anchor="rs", stroke_width=stroke, stroke_fill="black")
                     right -= draw.textlength(text, font=font)
             top = bottom + pad + 1
-    if phase_note:
-        draw_phase_note(im, phase_note)
+    if phase_note and (overlay := phase_note_overlay(phase_note, im.size)):
+        x = math.floor(max(0, w - overlay.width) * note_position[0] + .5)
+        y = math.floor(max(0, h - overlay.height) * note_position[1] + .5)
+        im.paste(overlay, (x, y), overlay)
     return cv2.cvtColor(np.asarray(im),cv2.COLOR_RGB2BGR)
 
 
@@ -806,6 +811,7 @@ def pause_plan(job: dict, durations: dict[str, float]) -> dict[int, list[tuple[s
 def export_video(job: dict, cfg: dict, durations: dict[str, float], custom_positions: list, progress=None) -> Path:
     plan=pause_plan(job,durations)
     notes = job.get("phase_notes", {})
+    note_positions = job.get("phase_note_positions", {})
     folder=Path(job["folder"])/"output";folder.mkdir(exist_ok=True)
     raw,final=folder/(uuid.uuid4().hex+"_raw.mp4"),folder/(uuid.uuid4().hex+"_analyzed.mp4")
     info=job["info"]
@@ -821,7 +827,8 @@ def export_video(job: dict, cfg: dict, durations: dict[str, float], custom_posit
             writer.write(image)
             for code, hold_frames in plan.get(i,[]):
                 paused=draw_annotations(frame,primitives_for(job,i,cfg,code,custom_positions),
-                                        code,sportsbox_overlay(job,code),phase_note=notes.get(code, ""))
+                                        code,sportsbox_overlay(job,code),phase_note=notes.get(code, ""),
+                                        note_position=note_positions.get(code, DEFAULT_PHASE_NOTE_POSITION))
                 for _ in range(hold_frames):writer.write(paused)
             if progress and i%10==0:progress((i+1)/info["frames"],f"動画を書き出し中 {i+1}/{info['frames']}")
         completed=True
@@ -858,6 +865,7 @@ def white_frame_margins(frame: np.ndarray) -> tuple[int, int, int, int]:
 def export_images(job: dict,cfg: dict,codes: list,custom_positions: list) -> dict:
     if not codes: raise ValueError("切り出すポジションを1つ以上選んでください。")
     notes = job.get("phase_notes", {})
+    note_positions = job.get("phase_note_positions", {})
     annotated_frames = []
     margins = []
     for code in codes:
@@ -866,7 +874,7 @@ def export_images(job: dict,cfg: dict,codes: list,custom_positions: list) -> dic
         margins.append(white_frame_margins(frame))
         annotated_frames.append(draw_annotations(
             frame, primitives_for(job, index, cfg, code, custom_positions),
-            code, sportsbox_overlay(job, code), phase_note=notes.get(code, ""),
+            code, sportsbox_overlay(job, code),
         ))
 
     # Use the same crop on every frame so the reference lines still align.
@@ -883,6 +891,11 @@ def export_images(job: dict,cfg: dict,codes: list,custom_positions: list) -> dic
     with zipfile.ZipFile(zip_data, "w", zipfile.ZIP_DEFLATED) as zf:
         for k, (code, annotated) in enumerate(zip(codes, annotated_frames)):
             cropped = annotated[top:h - bottom, left:w - right]
+            if note := notes.get(code):
+                cropped = draw_annotations(
+                    cropped, [], phase_note=note,
+                    note_position=note_positions.get(code, DEFAULT_PHASE_NOTE_POSITION),
+                )
             ok, png = cv2.imencode(".png", cropped)
             if not ok:
                 raise RuntimeError("静止画を作成できませんでした。")
@@ -956,6 +969,10 @@ def accept_editor_event(job: dict,event: dict | None,phase: str,frame: int) -> b
             if shape["type"]=="free" and not(isinstance(shape.get("points"),list) and 2<=len(shape["points"])<=5000 and all(valid_point(p) for p in shape["points"])):continue
             good.append(shape)
         job["shapes"]=good;changed=True
+    note_position = event.get("note_position")
+    if valid_point(note_position) and job.get("phase_notes", {}).get(phase):
+        job.setdefault("phase_note_positions", {})[phase] = note_position
+        changed = True
     job["last_event"]=event["event_id"]
     if changed:
         job["output_video"]=None;job["output_images"]=None
@@ -976,6 +993,30 @@ EDITOR_HTML = r"""
 *{box-sizing:border-box}body{margin:0;font-family:Arial,"Yu Gothic",Meiryo,sans-serif;color:#173831}#root{padding:0 1px 8px}html,body{overscroll-behavior:none}canvas{-webkit-touch-callout:none;user-select:none}.toolbar{margin-top:6px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;padding:8px;background:#edf2ec;border:1px solid #d8e0d5;border-radius:7px}button,select,input{font:inherit}button{min-height:36px;border:1px solid #b7c7b1;border-radius:5px;background:#fff;color:#173831;padding:6px 10px;cursor:pointer;font-size:12px}button.active{background:#1c4c40;color:white;border-color:#1c4c40}.toolbar label{font-size:11px;display:flex;align-items:center;gap:3px}.toolbar input[type=color]{width:29px;height:31px;padding:0;border:0;background:none}.toolbar select{height:31px;border:1px solid #b7c7b1;border-radius:4px;background:white;font-size:11px}.canvas-wrap{position:relative;display:inline-flex;max-width:100%}.phase-overlay{position:absolute;top:8px;left:8px;z-index:2;padding:3px;background:rgba(255,255,255,.9);border:1px solid #a9bbaa;border-radius:7px;box-shadow:0 1px 6px #0002}.phase-overlay select{font-size:16px;font-weight:bold;min-height:42px;min-width:84px;padding:6px 10px;background:transparent;border:0;border-radius:4px;color:#173831}.view{margin-top:0;background:#e9ede6;border:1px solid #cbd5c6;border-radius:7px;display:flex;justify-content:center;align-items:center;overflow:hidden}canvas{display:block;max-width:100%;max-height:620px;width:auto;height:auto;touch-action:none;cursor:grab}.hint{font-size:11px;line-height:1.8;color:#65755e;margin:7px 2px 0}#saved{font-size:11px;min-height:20px;margin:5px 2px 0;color:#36734a}button:focus-visible{outline:3px solid #c8dc8e}@media(max-width:600px){.toolbar{padding:6px;gap:4px}button{font-size:11px;min-height:38px;padding:5px 8px}canvas{max-height:560px}}
 </style></head><body><div id="root"><div class="view"><div class="canvas-wrap"><canvas id="canvas" width="720" height="960" aria-label="管理線を直接ドラッグするプレビュー"></canvas><div class="phase-overlay"><select id="phaseSelect" aria-label="ポジション"><option value="P1">P1</option><option value="P2">P2</option><option value="P3">P3</option><option value="P4">P4</option><option value="P5">P5</option><option value="P6">P6</option><option value="P7">P7</option><option value="P8">P8</option><option value="P9">P9</option><option value="P10">P10</option></select></div></div></div><div class="toolbar"><button data-tool="move" class="active">✥ 線を動かす</button><button data-tool="line">╱ 直線</button><button data-tool="arrow">→ 矢印線</button><button data-tool="angle">∠ 角度線</button><button data-tool="circle">○ 円</button><button data-tool="free">〰 手描き</button><input id="color" type="color" value="#ffff00" aria-label="手描きの色"><select id="width" aria-label="手描きの太さ"><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select><select id="dash" aria-label="手描きの線種"><option value="solid">実線</option><option value="dashed">点線</option></select><label><input id="angle" type="checkbox" checked>角度</label><label><input id="bind" type="checkbox" checked>このPのみ</label><button id="undo">↶ 戻す</button><button id="clear">描画を消去</button></div><p class="hint">丸をドラッグすると位置・角度を調整できます　シャフトとヒップは線そのものも動かせます<br>直線・矢印線・円・手描きは映像上をドラッグして追加します<br><span id="angleHint" hidden></span></p><div id="saved" role="status">動画と管理線を準備しています…</div></div><script>
 const $=id=>document.getElementById(id),canvas=$('canvas'),ctx=canvas.getContext('2d');let args=null,scene=null,g=null,body=null,shapes=[],tool='move',drag=null,active=null,history=[],lastEvent=null,lastHeight=0;const img=new Image();const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v)),clone=x=>JSON.parse(JSON.stringify(x));let changedG=false,changedB=false,changedS=false,angleDraft=null;
+const noteImage=new Image();
+let notePosition=null,changedNote=false;
+function noteBounds(){
+    if(!notePosition||!args.note_image||!noteImage.complete||!noteImage.naturalWidth)return null;
+    const width=noteImage.naturalWidth,height=noteImage.naturalHeight;
+    const travelX=Math.max(0,canvas.width-width),travelY=Math.max(0,canvas.height-height);
+    return {x:Math.round(travelX*notePosition[0]),y:Math.round(travelY*notePosition[1]),
+        width,height,travelX,travelY};
+}
+function hitNote(p){
+    const bounds=noteBounds();
+    if(!bounds)return null;
+    const dx=p[0]*canvas.width-bounds.x,dy=p[1]*canvas.height-bounds.y;
+    if(dx<0||dy<0||dx>bounds.width||dy>bounds.height)return null;
+    return {type:'note',dx,dy};
+}
+function moveNote(p,drag){
+    const bounds=noteBounds();
+    if(!bounds)return;
+    const x=bounds.travelX?clamp((p[0]*canvas.width-drag.dx)/bounds.travelX):notePosition[0];
+    const y=bounds.travelY?clamp((p[1]*canvas.height-drag.dy)/bounds.travelY):notePosition[1];
+    changedNote=changedNote||x!==notePosition[0]||y!==notePosition[1];
+    notePosition=[x,y];
+}
 function message(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*');}
 function height(){const h=Math.ceil($('root').getBoundingClientRect().height)+8;if(h!==lastHeight){lastHeight=h;message('streamlit:setFrameHeight',{height:h});}}
 function visible(s){return s.target_p?s.target_p===args.phase:args.custom_visible!==false;}
@@ -1093,9 +1134,13 @@ function render(){if(!args||!img.complete||!img.naturalWidth)return;ctx.clearRec
         ctx.beginPath();ctx.arc(p[0]*canvas.width,p[1]*canvas.height,5,0,Math.PI*2);ctx.fill();
     }
     ctx.restore();
-}if(tool==='move'){for(const h of handles()){ctx.save();ctx.setLineDash([]);ctx.fillStyle=h.color||'#e5f28b';ctx.strokeStyle='#163c30';ctx.lineWidth=2;ctx.beginPath();ctx.arc(h.p[0]*canvas.width,h.p[1]*canvas.height,Math.max(8,canvas.height*.012),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();if(h.label)text(h.label,[h.p[0]+.018,h.p[1]-.015],h.color);}}drawSportsbox(args.sportsbox);height();}
-function remember(){history.push(clone({g,body,shapes}));if(history.length>25)history.shift();}
-function emit(){if(!changedG&&!changedB&&!changedS)return;$('phaseSelect').disabled=true;lastEvent=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);message('streamlit:setComponentValue',{dataType:'json',value:{scene,event_id:lastEvent,guides:changedG?g:null,body:changedB?body:null,shapes:changedS?shapes:null}});changedG=changedB=changedS=false;$('saved').textContent='変更を反映中…';}
+}if(tool==='move'){for(const h of handles()){ctx.save();ctx.setLineDash([]);ctx.fillStyle=h.color||'#e5f28b';ctx.strokeStyle='#163c30';ctx.lineWidth=2;ctx.beginPath();ctx.arc(h.p[0]*canvas.width,h.p[1]*canvas.height,Math.max(8,canvas.height*.012),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();if(h.label)text(h.label,[h.p[0]+.018,h.p[1]-.015],h.color);}}drawSportsbox(args.sportsbox);
+    const note=noteBounds();
+    if(note)ctx.drawImage(noteImage,note.x,note.y);
+    height();
+}
+function remember(){history.push(clone({g,body,shapes,notePosition}));if(history.length>25)history.shift();}
+function emit(){if(!changedG&&!changedB&&!changedS&&!changedNote)return;$('phaseSelect').disabled=true;lastEvent=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);message('streamlit:setComponentValue',{dataType:'json',value:{scene,event_id:lastEvent,guides:changedG?g:null,body:changedB?body:null,shapes:changedS?shapes:null,note_position:changedNote?notePosition:null}});changedG=changedB=changedS=changedNote=false;$('saved').textContent='変更を反映中…';}
 function pos(e){const r=canvas.getBoundingClientRect();return[clamp((e.clientX-r.left)/r.width),clamp((e.clientY-r.top)/r.height)];}
 function hit(p){const rect=canvas.getBoundingClientRect();const distances=handles().map(h=>({h,d:Math.hypot((h.p[0]-p[0])*rect.width,(h.p[1]-p[1])*rect.height)})).filter(v=>v.d<25).sort((a,b)=>a.d-b.d);if(distances.length)return distances[0].h;
 const candidates=[];if(args.primitives.some(s=>s.id==='hip'))candidates.push({type:'hip',d:Math.abs(g.hip-p[0])*rect.width});if(args.primitives.some(s=>s.id==='shaft')){const[a,b]=g.shaft,dx=(b[0]-a[0])*2.2*rect.width,dy=(b[1]-a[1])*2.2*rect.height,x=(p[0]-a[0])*rect.width,y=(p[1]-a[1])*rect.height,t=clamp((x*dx+y*dy)/(dx*dx+dy*dy||1));candidates.push({type:'shaftMove',d:Math.hypot(x-dx*t,y-dy*t)});}return candidates.filter(v=>v.d<13).sort((a,b)=>a.d-b.d)[0]||null;}
@@ -1133,7 +1178,7 @@ canvas.addEventListener('pointerdown',e=>{
     const p=pos(e);
     canvas.setPointerCapture(e.pointerId);
     if(tool==='move'){
-        drag=hit(p);
+        drag=hitNote(p)||hit(p);
         if(drag){remember();drag.last=p;$('saved').textContent='調整中…';}
     }else if(tool!=='angle'){
         const base=drawingStyle();
@@ -1143,7 +1188,7 @@ canvas.addEventListener('pointerdown',e=>{
     }
     e.preventDefault();
 });
-canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'||d.type==='back_vertical'){g[d.type]=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='torsoMove'){
+canvas.addEventListener('pointermove',e=>{if(e.pointerId!==activePointer||(!drag&&!active))return;const p=pos(e);if(drag){const d=drag;if(d.type==='note'){moveNote(p,d);}else if(d.type==='shaft'){g.shaft[d.key]=p;changedG=true;}else if(d.type==='shaftMove'){g.shaft=translate(g.shaft,[p[0]-d.last[0],p[1]-d.last[1]]);d.last=p;changedG=true;}else if(d.type==='hip'){g.hip=p[0];changedG=true;}else if(d.type==='vertical'||d.type==='back_vertical'){g[d.type]=p[0];changedG=true;}else if(d.type==='ankles'){g.ankles[d.key]=p[0];changedG=true;}else if(d.type==='torsoMove'){
     const delta=p.map((value,i)=>value-d.last[i]);
     const [hip,sh,ls,rs]=translate([body.hip,body.sh,body.ls,body.rs],delta);
     Object.assign(body,{hip,sh,ls,rs});
@@ -1167,6 +1212,7 @@ function finishGesture(e){
     if(e.pointerId!==activePointer)return;
     activePointer=null;
     if(tool==='angle'&&e.type==='pointerup')addAnglePoint(pos(e));
+    if(drag?.type==='note'&&e.type==='pointerup')moveNote(pos(e),drag);
     if(active){
         if(active.type==='arrow'&&e.type==='pointerup')active.b=pos(e);
         const valid=active.type==='free'?active.points.length>=2:
@@ -1194,7 +1240,10 @@ $('undo').onclick=()=>{
     if(angleDraft){angleDraft=null;angleHint();render();return;}
     if(!history.length)return;
     const prev=history.pop();g=prev.g;body=prev.body;shapes=prev.shapes;
-    changedG=changedS=true;changedB=!!body;render();emit();
+    changedG=changedS=true;changedB=!!body;
+    changedNote=!!args.note_image&&prev.notePosition?.some((value,i)=>value!==notePosition?.[i]);
+    notePosition=prev.notePosition;
+    render();emit();
 };
 $('clear').onclick=()=>{
     angleDraft=null;angleHint();remember();shapes=shapes.filter(s=>!visible(s));changedS=true;render();emit();
@@ -1213,7 +1262,11 @@ function returnToEditor(id){
         window.frameElement.scrollIntoView({block:'start'});
     });
 }
-img.onload=()=>{render();height();};window.addEventListener('message',e=>{if(e.source!==window.parent||e.data.type!=='streamlit:render')return;args=e.data.args;$('phaseSelect').value=args.phase;$('phaseSelect').disabled=!!(lastEvent&&args.ack!==lastEvent);returnToEditor(args.restore_view);const newScene=args.scene!==scene;scene=args.scene;g=clone(args.guides);body=clone(args.body);shapes=clone(args.shapes);if(newScene){history=[];angleDraft=null;tool='move';canvas.style.cursor='grab';angleHint();document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool==='move'));}canvas.width=args.width;canvas.height=args.height;const src='data:image/jpeg;base64,'+args.image;if(img.src!==src)img.src=src;else render();$('saved').textContent=lastEvent&&args.ack===lastEvent?'✓ 変更を保存しました':'丸・線を直接ドラッグして調整してください';height();});
+img.onload=()=>{render();height();};noteImage.onload=render;window.addEventListener('message',e=>{if(e.source!==window.parent||e.data.type!=='streamlit:render')return;args=e.data.args;$('phaseSelect').value=args.phase;$('phaseSelect').disabled=!!(lastEvent&&args.ack!==lastEvent);returnToEditor(args.restore_view);const newScene=args.scene!==scene;scene=args.scene;g=clone(args.guides);body=clone(args.body);shapes=clone(args.shapes);notePosition=args.note_position;
+if(args.note_image){
+    const noteSrc='data:image/png;base64,'+args.note_image;
+    if(noteImage.src!==noteSrc)noteImage.src=noteSrc;
+}if(newScene){history=[];angleDraft=null;tool='move';canvas.style.cursor='grab';angleHint();document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool==='move'));}canvas.width=args.width;canvas.height=args.height;const src='data:image/jpeg;base64,'+args.image;if(img.src!==src)img.src=src;else render();$('saved').textContent=lastEvent&&args.ack===lastEvent?'✓ 変更を保存しました':'丸・線を直接ドラッグして調整してください';height();});
 new ResizeObserver(height).observe($('root'));window.addEventListener('resize',height);message('streamlit:componentReady',{apiVersion:1});height();
 </script></body></html>
 """
@@ -2437,18 +2490,24 @@ def render_app():
         slider_col.slider("コマ番号",0,info["frames"]-1,key=widget,on_change=frame_change,args=(code,widget),label_visibility="collapsed")
         next_col.button("次 ▶",help="1コマ後",on_click=step_frame,args=(code,widget,1),use_container_width=True)
         phase_notes = job.get("phase_notes", {})
+        note_positions = job.get("phase_note_positions", {})
         note = phase_notes.get(code, "")
         note_key = f"phase_note_{job['token']}_{code}"
         st.text_input(
             f"{code}の表示テキスト", value=note, max_chars=PHASE_NOTE_MAX_CHARS, key=note_key,
             placeholder="例　切り返しで左足に乗る",
-            help="Enterで反映します。プレビュー・静止画・動画でこのPが停止する間に表示します。",
+            help="Enterで反映します。「線を動かす」で映像上のテキストをドラッグできます。",
             on_change=store_phase_note, args=(code, note_key),
         )
+        if note:
+            st.caption("「線を動かす」で、プレビュー上のテキストをドラッグできます。")
         frame_index=int(st.session_state[widget]);job["p_frames"][code]=frame_index
         current=read_frame(job["path"],frame_index)
-        if note:
-            current = draw_annotations(current, [], phase_note=note)
+        note_image = None
+        if note and (overlay := phase_note_overlay(note, (info["width"], info["height"]))):
+            buffer = io.BytesIO()
+            overlay.save(buffer, format="PNG")
+            note_image = base64.b64encode(buffer.getvalue()).decode()
         ok,jpg=cv2.imencode(".jpg",current,[cv2.IMWRITE_JPEG_QUALITY,88])
         body=get_pose(job,frame_index,code)
         if code == "P1" and (reference := right_leg_reference(job)):
@@ -2456,7 +2515,7 @@ def render_app():
         if "pelvis_circle" in enabled:
             pelvis_track(job)
         component=editor_component()
-        event=component(image=base64.b64encode(jpg).decode(),width=info["width"],height=info["height"],scene=f"{job['token']}:{code}:{frame_index}",phase=code,frame=frame_index,guides=job["guides"],body=body,primitives=primitives_for({**job,"shapes":[]},frame_index,cfg,code,custom_positions),shapes=job["shapes"],active_line=line,custom_visible=in_positions(frame_index,custom_positions,job["p_frames"]),sportsbox=sportsbox_overlay(job,code),restore_view=st.session_state.get("restore_view"),ack=job["last_event"],key=f"editor_{job['token']}",default=None)
+        event=component(image=base64.b64encode(jpg).decode(),width=info["width"],height=info["height"],scene=f"{job['token']}:{code}:{frame_index}",phase=code,frame=frame_index,guides=job["guides"],body=body,primitives=primitives_for({**job,"shapes":[]},frame_index,cfg,code,custom_positions),shapes=job["shapes"],active_line=line,custom_visible=in_positions(frame_index,custom_positions,job["p_frames"]),sportsbox=sportsbox_overlay(job,code),note_image=note_image,note_position=note_positions.get(code, DEFAULT_PHASE_NOTE_POSITION),restore_view=st.session_state.get("restore_view"),ack=job["last_event"],key=f"editor_{job['token']}",default=None)
         next_phase=editor_phase_change(job,event,code,frame_index)
         if next_phase:
             st.session_state["active_p"]=next_phase
@@ -2477,6 +2536,7 @@ def render_app():
                 preview = draw_annotations(
                     read_frame(job["path"],idx), primitives_for(job,idx,cfg,p,custom_positions),
                     p, sportsbox_overlay(job,p), phase_note=phase_notes.get(p, ""),
+                    note_position=note_positions.get(p, DEFAULT_PHASE_NOTE_POSITION),
                 )
                 col.image(cv2.cvtColor(preview,cv2.COLOR_BGR2RGB),caption=f"{p} {idx}コマ",use_container_width=True)
     st.divider();st.subheader("3. 作成して保存する")
