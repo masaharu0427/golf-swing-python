@@ -653,11 +653,11 @@ def sportsbox_overlay(job: dict, phase: str) -> list[list[list[tuple[str, str]]]
 
 def phase_note_overlay(note: str, frame_size: tuple[int, int]) -> Image.Image | None:
     width, height = frame_size
-    size = max(1, round(min(width * .047, height * .042)))
+    size = max(1, round(min(width * .037, height * .033)))
     font = pil_font(size)
     margin = max(1, round(width * .045))
-    pad = max(1, size // 3)
-    stroke = max(1, size // 12)
+    pad = max(1, size // 5)
+    stroke = max(1, round(size * .10))
     max_width = max(1, width - 2 * (margin + pad + stroke))
     draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     lines = []
@@ -681,10 +681,6 @@ def phase_note_overlay(note: str, frame_size: tuple[int, int]) -> Image.Image | 
     text_width, text_height = right - left, bottom - top
     overlay = Image.new("RGBA", (text_width + 2 * pad, text_height + 2 * pad))
     draw = ImageDraw.Draw(overlay)
-    draw.rounded_rectangle(
-        (0, 0, overlay.width - 1, overlay.height - 1),
-        radius=pad, fill=(0, 0, 0, 175),
-    )
     draw.multiline_text(
         (pad - left, pad - top), caption, font=font, fill="white", spacing=gap,
         align="center", stroke_width=stroke, stroke_fill="black",
@@ -1006,14 +1002,17 @@ function hitNote(p){
     const bounds=noteBounds();
     if(!bounds)return null;
     const dx=p[0]*canvas.width-bounds.x,dy=p[1]*canvas.height-bounds.y;
-    if(dx<0||dy<0||dx>bounds.width||dy>bounds.height)return null;
-    return {type:'note',dx,dy};
+    const rect=canvas.getBoundingClientRect();
+    const slopX=8*canvas.width/rect.width,slopY=8*canvas.height/rect.height;
+    if(dx< -slopX||dy< -slopY||dx>bounds.width+slopX||dy>bounds.height+slopY)return null;
+    return {type:'note',start:p,originalPosition:notePosition};
 }
 function moveNote(p,drag){
     const bounds=noteBounds();
     if(!bounds)return;
-    const x=bounds.travelX?clamp((p[0]*canvas.width-drag.dx)/bounds.travelX):notePosition[0];
-    const y=bounds.travelY?clamp((p[1]*canvas.height-drag.dy)/bounds.travelY):notePosition[1];
+    const [originX,originY]=drag.originalPosition;
+    const x=bounds.travelX?clamp(originX+(p[0]-drag.start[0])*canvas.width/bounds.travelX):originX;
+    const y=bounds.travelY?clamp(originY+(p[1]-drag.start[1])*canvas.height/bounds.travelY):originY;
     changedNote=changedNote||x!==notePosition[0]||y!==notePosition[1];
     notePosition=[x,y];
 }
@@ -1177,8 +1176,12 @@ canvas.addEventListener('pointerdown',e=>{
     activePointer=e.pointerId;
     const p=pos(e);
     canvas.setPointerCapture(e.pointerId);
-    if(tool==='move'){
-        drag=hitNote(p)||hit(p);
+    drag=hitNote(p);
+    if(drag){
+        canvas.style.cursor='grabbing';
+        $('saved').textContent='テキストを移動中…';
+    }else if(tool==='move'){
+        drag=hit(p);
         if(drag){remember();drag.last=p;$('saved').textContent='調整中…';}
     }else if(tool!=='angle'){
         const base=drawingStyle();
@@ -1211,8 +1214,23 @@ if(active){if(active.type==='line'||active.type==='arrow')active.b=p;if(active.t
 function finishGesture(e){
     if(e.pointerId!==activePointer)return;
     activePointer=null;
-    if(tool==='angle'&&e.type==='pointerup')addAnglePoint(pos(e));
-    if(drag?.type==='note'&&e.type==='pointerup')moveNote(pos(e),drag);
+    if(drag?.type==='note'){
+        if(e.type==='pointerup'){
+            moveNote(pos(e),drag);
+            changedNote=notePosition.some((value,i)=>value!==drag.originalPosition[i]);
+            if(changedNote){
+                history.push({noteOnly:true,notePosition:drag.originalPosition});
+                if(history.length>25)history.shift();
+            }
+        }else{
+            notePosition=drag.originalPosition;
+            changedNote=false;
+        }
+        canvas.style.cursor='grab';
+        if(!changedNote)$('saved').textContent='テキストをドラッグして移動できます';
+    }else if(tool==='angle'&&e.type==='pointerup'){
+        addAnglePoint(pos(e));
+    }
     if(active){
         if(active.type==='arrow'&&e.type==='pointerup')active.b=pos(e);
         const valid=active.type==='free'?active.points.length>=2:
@@ -1239,7 +1257,13 @@ document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{
 $('undo').onclick=()=>{
     if(angleDraft){angleDraft=null;angleHint();render();return;}
     if(!history.length)return;
-    const prev=history.pop();g=prev.g;body=prev.body;shapes=prev.shapes;
+    const prev=history.pop();
+    if(prev.noteOnly){
+        notePosition=prev.notePosition;
+        changedNote=!!args.note_image;
+        render();emit();return;
+    }
+    g=prev.g;body=prev.body;shapes=prev.shapes;
     changedG=changedS=true;changedB=!!body;
     changedNote=!!args.note_image&&prev.notePosition?.some((value,i)=>value!==notePosition?.[i]);
     notePosition=prev.notePosition;
@@ -2496,11 +2520,11 @@ def render_app():
         st.text_input(
             f"{code}の表示テキスト", value=note, max_chars=PHASE_NOTE_MAX_CHARS, key=note_key,
             placeholder="例　切り返しで左足に乗る",
-            help="Enterで反映します。「線を動かす」で映像上のテキストをドラッグできます。",
+            help="Enterで反映します。映像上のテキストを直接ドラッグして移動できます。",
             on_change=store_phase_note, args=(code, note_key),
         )
         if note:
-            st.caption("「線を動かす」で、プレビュー上のテキストをドラッグできます。")
+            st.caption("白文字・黒縁取りのテキストを、プレビュー上で直接ドラッグできます。")
         frame_index=int(st.session_state[widget]);job["p_frames"][code]=frame_index
         current=read_frame(job["path"],frame_index)
         note_image = None
