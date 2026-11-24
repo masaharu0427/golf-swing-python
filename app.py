@@ -28,7 +28,7 @@ import streamlit as st
 from streamlit.components.v1 import declare_component
 
 P_CODES = [f"P{i}" for i in range(1, 11)]
-PHASE_NOTE_MAX_CHARS = 60
+PHASE_NOTE_MAX_CHARS = 100
 DEFAULT_PHASE_NOTE_POSITION = (.5, .95)
 PHASE_NOTE_SIZES = list(range(70, 151, 10))
 DEFAULT_PHASE_NOTE_SIZE = 100
@@ -668,18 +668,18 @@ def phase_note_overlay(note: str, frame_size: tuple[int, int],
     max_width = max(1, width - 2 * (margin + pad + stroke))
     draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     lines = []
-    line = ""
-    for char in note:
-        if line and draw.textlength(line + char, font=font) > max_width:
-            lines.append(line.rstrip())
-            line = ""
-        if line or not char.isspace():
-            line += char
-    if line:
+    for paragraph in note.splitlines():
+        line = ""
+        for char in paragraph:
+            if line and draw.textlength(line + char, font=font) > max_width:
+                lines.append(line.rstrip())
+                line = ""
+            if line or not char.isspace():
+                line += char
         lines.append(line.rstrip())
+    if not any(lines):
+        return None
     caption = "\n".join(lines)
-    if not caption:
-        return
     gap = max(1, size // 5)
     bounds = draw.multiline_textbbox(
         (0, 0), caption, font=font, spacing=gap, align="center", stroke_width=stroke,
@@ -695,6 +695,7 @@ def phase_note_overlay(note: str, frame_size: tuple[int, int],
         (pad - left, pad - top), caption, font=font, fill=color, spacing=gap,
         align="center", stroke_width=stroke, stroke_fill="black",
     )
+    overlay.thumbnail(frame_size, Image.Resampling.LANCZOS)
     return overlay
 
 
@@ -1408,7 +1409,7 @@ def clear_outputs():
 
 
 def store_phase_note(code: str, widget_key: str) -> None:
-    note = st.session_state[widget_key].strip()
+    note = st.session_state[widget_key].strip()[:PHASE_NOTE_MAX_CHARS]
     notes = st.session_state["job"].setdefault("phase_notes", {})
     if note:
         notes[code] = note
@@ -2537,10 +2538,10 @@ def render_app():
         note = phase_notes.get(code, "")
         note_style = note_styles.get(code, {})
         note_key = f"phase_note_{job['token']}_{code}"
-        st.text_input(
-            f"{code}の表示テキスト", value=note, max_chars=PHASE_NOTE_MAX_CHARS, key=note_key,
+        st.text_area(
+            f"{code}の表示テキスト", value=note, height=78, max_chars=PHASE_NOTE_MAX_CHARS, key=note_key,
             placeholder="例　切り返しで左足に乗る",
-            help="Enterで反映します。映像上のテキストを直接ドラッグして移動できます。",
+            help="Enterで改行します。入力欄の外をクリックすると反映します。映像上のテキストを直接ドラッグして移動できます。",
             on_change=store_phase_note, args=(code, note_key),
         )
         size_col, color_col = st.columns(2)
