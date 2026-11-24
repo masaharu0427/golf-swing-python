@@ -2323,6 +2323,30 @@ def main():
     st.set_page_config(page_title="ゴルフスイング分析・簡単操作版",page_icon="🏌️",layout="wide",initial_sidebar_state="expanded")
     st.markdown("""<style>
     html, body, [data-testid="stMain"] {overscroll-behavior: none;}
+    @media (pointer: fine) {
+        html, [data-testid="stMain"] {
+            scrollbar-width: auto;
+            scrollbar-color: auto;
+        }
+        html::-webkit-scrollbar,
+        [data-testid="stMain"]::-webkit-scrollbar {
+            width: 22px;
+        }
+        html::-webkit-scrollbar-track:vertical,
+        [data-testid="stMain"]::-webkit-scrollbar-track:vertical {
+            background: #e8eeec;
+        }
+        html::-webkit-scrollbar-thumb:vertical,
+        [data-testid="stMain"]::-webkit-scrollbar-thumb:vertical {
+            background: #648478;
+            border: 2px solid #e8eeec;
+            border-radius: 12px;
+        }
+        html::-webkit-scrollbar-thumb:vertical:hover,
+        [data-testid="stMain"]::-webkit-scrollbar-thumb:vertical:hover {
+            background: #456a5c;
+        }
+    }
     </style>""", unsafe_allow_html=True)
     restore_workspace()
     try:
