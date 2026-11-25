@@ -51,9 +51,9 @@ SWAY_CIRCLE_POINTS = {"pelvis_circle": ("pelvis", "hip", .045),
                          for guide, (key, _) in KNEE_LANDMARKS.items()}}
 THIN_DEFAULT_LINES = {"head", "ankles", "hip", "vertical", "shaft", *SWAY_CIRCLE_POINTS}
 DEFAULT_TARGET_SIDE = "右"
-FRONT_ONLY_LINES = ("right_leg_outer", *SWAY_CIRCLE_POINTS)
-DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES]
-FRONT_DEFAULT_LINES = ["head", "tilt", "shoulders", "ankles", *FRONT_ONLY_LINES]
+FRONT_ONLY_LINES = ("right_leg_outer", "right_knee_circle", "left_knee_circle")
+DEFAULT_LINES = ["head", "spine", "shoulders", "shaft", "hip", *REAR_ONLY_LINES, "pelvis_circle"]
+FRONT_DEFAULT_LINES = ["head", "tilt", "shoulders", "ankles", "right_leg_outer", *SWAY_CIRCLE_POINTS]
 RIGHT_LEG_POINTS = ("right_ankle_outer", "right_thigh_outer")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
 
@@ -2480,7 +2480,7 @@ def render_app():
         st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, *REAR_ONLY_LINES]))
     if styles and "right_leg_outer" not in styles and not rear_mode:
         current_lines = st.session_state["enabled_lines"]
-        st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, *FRONT_ONLY_LINES]))
+        st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, "right_leg_outer", *SWAY_CIRCLE_POINTS]))
     if styles and "pelvis_circle" not in styles and not rear_mode:
         current_lines = st.session_state["enabled_lines"]
         st.session_state["enabled_lines"] = list(dict.fromkeys([*current_lines, "pelvis_circle"]))
@@ -2578,15 +2578,13 @@ def render_app():
         clear_outputs()
     job["camera_mode"] = st.session_state["camera_mode"]
     if not job.get("pelvis_vertical_tracking"):
-        if not rear_mode and "pelvis_circle" in enabled:
+        if "pelvis_circle" in enabled:
             clear_outputs()
         job["pelvis_vertical_tracking"] = True
     if not job.get("knee_vertical_tracking"):
         if not rear_mode and any(f"{guide}_circle" in enabled for guide in KNEE_LANDMARKS):
             clear_outputs()
         job["knee_vertical_tracking"] = True
-    if not rear_mode and not any(pose and "pelvis_visible" in pose for pose in job["poses"]):
-        st.caption("骨盤の円を表示するには、AI骨格解析を有効にして動画を読み込み直してください。")
     if "back_vertical" not in job["guides"]:
         reference = get_pose(job, job["p_frames"]["P1"], "P1")
         job["guides"]["back_vertical"] = rear_reference_x(reference)
@@ -2645,9 +2643,12 @@ def render_app():
         if tracked_sway_point(job["poses"], job["p_frames"]["P1"], job["info"]["fps"], guide, point) is None:
             st.caption(f"P1で{knee}を検出できません。{knee}が見えるコマにP1を調整してください。")
     if line == "pelvis_circle":
-        st.caption("点線はP1の基準です。実線は骨盤中心の左右・上下の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
-        if pelvis_track(job)[job["p_frames"]["P1"]] is None:
-            st.caption("P1で骨盤の位置を確認できません。左右の腰が見えるコマにP1を調整してください。")
+        st.caption("点線はP1の基準です。実線は画面上の骨盤中心の左右・上下の動きに追従します。中央の点で位置、右端の点で大きさを調整できます。")
+        track = pelvis_track(job)
+        if not any(point is not None for point in track):
+            st.caption("骨盤の位置を検出できませんでした。「AI骨格解析を行う」を有効にして動画を読み込み直してください。")
+        elif track[job["p_frames"]["P1"]] is None:
+            st.caption("P1で骨盤の位置を確認できません。腰の位置を検出できるコマにP1を調整してください。")
     if line == "right_leg_outer":
         st.caption("P1の外くるぶしと太ももの付け根を結び、同じ位置・角度でP4まで表示します。P1で両端の丸をドラッグして調整できます。角度の基準は画面の水平線（0°）です。")
     with st.expander("点線・表示するPを変更"):
